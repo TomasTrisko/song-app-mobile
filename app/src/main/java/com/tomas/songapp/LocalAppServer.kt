@@ -568,7 +568,7 @@ class LocalAppServer(private val appContext: Context) {
                 addOption("-o", outTemplate)
             }
             val resp = YoutubeDL.getInstance().execute(ytReq)
-            val stdOut = resp.getOut() ?: ""
+            val stdOut = resp.out ?: ""
 
             var meta: JSONObject? = null
             for (line in stdOut.split(Regex("\\r?\\n"))) {
