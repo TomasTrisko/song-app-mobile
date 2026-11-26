@@ -180,13 +180,36 @@ function notifyAndroidPlayback(playing) {
     try { window.AndroidApp.stopPlaybackNotification(); } catch {}
     return;
   }
+  const posMs = isFinite(audioEl.currentTime) ? Math.max(0, Math.floor(audioEl.currentTime * 1000)) : 0;
+  const durMs = isFinite(audioEl.duration) && audioEl.duration > 0 ? Math.floor(audioEl.duration * 1000) : 0;
+  const speed = isFinite(audioEl.playbackRate) && audioEl.playbackRate > 0 ? audioEl.playbackRate : 1.0;
+  const cover = (!state.settings.lightweightMode && song.coverFile) ? song.coverFile : "";
   try {
-    window.AndroidApp.updatePlaybackNotification(song.title || "Song App", song.artist || "Neznámý interpret", Boolean(playing));
+    if (typeof window.AndroidApp.updatePlaybackMedia === "function") {
+      window.AndroidApp.updatePlaybackMedia(
+        song.title || "Song App",
+        song.artist || "Neznámý interpret",
+        song.album || "Song App",
+        cover,
+        Boolean(playing),
+        posMs,
+        durMs,
+        speed
+      );
+    } else {
+      window.AndroidApp.updatePlaybackNotification(song.title || "Song App", song.artist || "Neznámý interpret", Boolean(playing));
+    }
   } catch {}
 }
 
 window.handleAndroidMediaAction = function (act) {
-  if (act === "toggle") {
+  if (act === "play") {
+    if (!state.playingId) return;
+    ensureAudioGraph();
+    audioEl.play().catch(() => {});
+  } else if (act === "pause") {
+    audioEl.pause();
+  } else if (act === "toggle") {
     if (!state.playingId) return;
     ensureAudioGraph();
     if (audioEl.paused) audioEl.play().catch(() => {});
@@ -196,6 +219,14 @@ window.handleAndroidMediaAction = function (act) {
   } else if (act === "prev") {
     playAdjacent(-1);
   }
+};
+
+window.handleAndroidMediaSeek = function (posMs) {
+  if (!state.playingId || !isFinite(audioEl.duration) || audioEl.duration <= 0) return;
+  const sec = Math.max(0, Math.min(audioEl.duration, Number(posMs) / 1000));
+  audioEl.currentTime = sec;
+  updateActiveLyric(true);
+  notifyAndroidPlayback(!audioEl.paused);
 };
 
 window.handleAndroidBack = function () {
@@ -1310,6 +1341,7 @@ function applyPitchRate() {
   $("fsPitchBar").value = st;
   $("fsPitchVal").textContent = label;
   updateQuickFxBadge();
+  if (state.playingId) notifyAndroidPlayback(!audioEl.paused);
 }
 
 function applyReverb() {
@@ -1505,6 +1537,7 @@ function applyDynamicColor(song) {
 
 // ===================== MEDIA SESSION (LOCK SCREEN / BLUETOOTH) =====================
 function updateMediaSession(songOverride = null) {
+  if (IS_NATIVE_ANDROID) return; // Native Android uses MediaSessionCompat in MusicForegroundService
   if (!("mediaSession" in navigator)) return;
   if (!state.settings.mediaSession) { navigator.mediaSession.metadata = null; return; }
   const song = songOverride || getSongById(state.playingId);
@@ -2498,8 +2531,12 @@ audioEl.addEventListener("loadedmetadata", () => {
   $("fsTotalTime").textContent = tot;
   renderAbLoop();
   updateActiveLyric(false);
+  notifyAndroidPlayback(!audioEl.paused);
 });
-audioEl.addEventListener("seeked", () => updateActiveLyric(true));
+audioEl.addEventListener("seeked", () => {
+  updateActiveLyric(true);
+  notifyAndroidPlayback(!audioEl.paused);
+});
 
 let lastLwTick = 0;
 audioEl.addEventListener("timeupdate", () => {

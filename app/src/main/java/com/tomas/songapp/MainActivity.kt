@@ -142,6 +142,14 @@ class MainActivity : AppCompatActivity() {
                 )
             }
         }
+        MusicForegroundService.onMediaSeek = { posMs ->
+            runOnUiThread {
+                webView.evaluateJavascript(
+                    "window.handleAndroidMediaSeek && window.handleAndroidMediaSeek($posMs);",
+                    null
+                )
+            }
+        }
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
@@ -225,13 +233,27 @@ class MainActivity : AppCompatActivity() {
         }
 
         @JavascriptInterface
-        fun updatePlaybackNotification(title: String, artist: String, playing: Boolean) {
+        fun updatePlaybackMedia(
+            title: String,
+            artist: String,
+            album: String,
+            coverPath: String,
+            playing: Boolean,
+            positionMs: Long,
+            durationMs: Long,
+            speed: Float
+        ) {
             runOnUiThread {
                 val intent = Intent(this@MainActivity, MusicForegroundService::class.java).apply {
                     action = MusicForegroundService.ACTION_UPDATE
                     putExtra(MusicForegroundService.EXTRA_TITLE, title)
                     putExtra(MusicForegroundService.EXTRA_ARTIST, artist)
+                    putExtra(MusicForegroundService.EXTRA_ALBUM, album)
+                    putExtra(MusicForegroundService.EXTRA_COVER, coverPath)
                     putExtra(MusicForegroundService.EXTRA_PLAYING, playing)
+                    putExtra(MusicForegroundService.EXTRA_POSITION, positionMs)
+                    putExtra(MusicForegroundService.EXTRA_DURATION, durationMs)
+                    putExtra(MusicForegroundService.EXTRA_SPEED, speed)
                 }
                 try {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -242,6 +264,11 @@ class MainActivity : AppCompatActivity() {
                 } catch (_: Exception) {
                 }
             }
+        }
+
+        @JavascriptInterface
+        fun updatePlaybackNotification(title: String, artist: String, playing: Boolean) {
+            updatePlaybackMedia(title, artist, "Song App", "", playing, 0L, 0L, 1.0f)
         }
 
         @JavascriptInterface

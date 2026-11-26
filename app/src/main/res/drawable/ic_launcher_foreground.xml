@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Subtle translucent soundwave halo -->
+    <path
+        android:fillColor="#22FFFFFF"
+        android:pathData="M54,23 A31,31 0 1,0 54,85 A31,31 0 1,0 54,23 Z" />
+    <!-- Crisp modern double beamed eighth note centered inside 66dp safe zone -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M45,36.5 L72.5,31.2 C74.4,30.8 76,32.2 76,34.1 L76,62.5 C76,67.5 71.7,71.2 66.5,71.2 C61.5,71.2 57.8,67.8 57.8,63.5 C57.8,59.1 61.6,55.8 66.7,55.8 C68.1,55.8 69.3,56.0 70.5,56.5 L70.5,43.0 L47.5,47.4 L47.5,68.2 C47.5,73.2 43.2,77.0 38.0,77.0 C33.0,77.0 29.3,73.6 29.3,69.3 C29.3,64.9 33.1,61.6 38.2,61.6 C39.6,61.6 40.8,61.8 42.0,62.3 L42.0,39.5 C42.0,38.0 43.3,36.8 45,36.5 Z" />
+</vector>
