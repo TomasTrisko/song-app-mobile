@@ -1,0 +1,65 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Gradle 8.7
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Build Signed APK
+        run: |
+          gradle assembleRelease --no-daemon --stacktrace \
+            -PversionCode=${{ github.run_number }} \
+            -PversionName=1.0.${{ github.run_number }} \
+            -PgithubRepo=${{ github.repository }}
+
+      - name: Prepare APK and version metadata
+        run: |
+          mkdir -p dist
+          cp app/build/outputs/apk/release/app-release.apk dist/SongApp-Mobile.apk
+          cat > dist/version.json <<EOF
+          {
+            "versionCode": ${{ github.run_number }},
+            "versionName": "1.0.${{ github.run_number }}",
+            "repo": "${{ github.repository }}"
+          }
+          EOF
+          ls -lh dist/
+
+      - name: Upload SongApp-Mobile.apk Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SongApp-Mobile-APK
+          path: dist/SongApp-Mobile.apk
+          retention-days: 30
+
+      - name: Publish GitHub Release (for In-App Auto-Updater)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: Song App v1.0.${{ github.run_number }}
+          body: "Automaticky sestavená aktualizace Song App Mobile (v1.0.${{ github.run_number }})."
+          files: |
+            dist/SongApp-Mobile.apk
+            dist/version.json
