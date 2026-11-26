@@ -3,6 +3,7 @@ package com.tomas.songapp
 import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
@@ -10,6 +11,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
+import android.view.View
 import android.view.ViewGroup
 import android.webkit.JavascriptInterface
 import android.webkit.ValueCallback
@@ -29,6 +31,13 @@ class MainActivity : AppCompatActivity() {
     companion object {
         @Volatile
         private var sharedServer: LocalAppServer? = null
+    }
+
+    private class BackgroundWebView(context: Context) : WebView(context) {
+        override fun onWindowVisibilityChanged(visibility: Int) {
+            // Keep WebView audio, Web Audio FX, and JS song-end timers alive when app is in background or screen locked
+            super.onWindowVisibilityChanged(View.VISIBLE)
+        }
     }
 
     private lateinit var webView: WebView
@@ -74,7 +83,7 @@ class MainActivity : AppCompatActivity() {
         }
         val port = server.port
 
-        webView = WebView(this).apply {
+        webView = BackgroundWebView(this).apply {
             layoutParams = ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
@@ -125,6 +134,15 @@ class MainActivity : AppCompatActivity() {
         setContentView(webView)
         webView.loadUrl("http://127.0.0.1:$port/")
 
+        MusicForegroundService.onMediaAction = { act ->
+            runOnUiThread {
+                webView.evaluateJavascript(
+                    "window.handleAndroidMediaAction && window.handleAndroidMediaAction('$act');",
+                    null
+                )
+            }
+        }
+
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
                 webView.evaluateJavascript(
@@ -138,8 +156,15 @@ class MainActivity : AppCompatActivity() {
         })
     }
 
+    override fun onPause() {
+        super.onPause()
+        // Keep timers active in background so next-song auto-advance works seamlessly
+        if (::webView.isInitialized) webView.resumeTimers()
+    }
+
     override fun onResume() {
         super.onResume()
+        if (::webView.isInitialized) webView.resumeTimers()
         if (pendingInstallAfterPermission) {
             pendingInstallAfterPermission = false
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O || packageManager.canRequestPackageInstalls()) {
