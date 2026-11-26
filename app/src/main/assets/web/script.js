@@ -185,6 +185,19 @@ function notifyAndroidPlayback(playing) {
   } catch {}
 }
 
+window.handleAndroidMediaAction = function (act) {
+  if (act === "toggle") {
+    if (!state.playingId) return;
+    ensureAudioGraph();
+    if (audioEl.paused) audioEl.play().catch(() => {});
+    else audioEl.pause();
+  } else if (act === "next") {
+    playAdjacent(1);
+  } else if (act === "prev") {
+    playAdjacent(-1);
+  }
+};
+
 window.handleAndroidBack = function () {
   for (const id of ["duplicateModal", "deleteModal", "addToPlaylistModal", "playlistModal", "songModal", "actionSheet"]) {
     const el = $(id);
