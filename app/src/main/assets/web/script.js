@@ -1,0 +1,2526 @@
+const OFFLINE_CACHE = "song-app-offline-v1";
+const DEFAULT_SETTINGS = {
+  lightweightMode: false,
+  themeMode: "color-dynamic-dark",
+  dynamicColor: true,
+  visualizerMode: "background",
+  autoScrollLyrics: true,
+  mediaSession: true,
+  defaultVolume: 40,
+  rememberVolume: false,
+  rememberAudioFx: true,
+  rememberPlaybackModes: true,
+  defaultTranslationMode: "both",
+  lastVolume: 40,
+  lastPitch: 0,
+  lastReverb: 0,
+  lastShuffle: false,
+  lastRepeat: "off",
+  rememberPlaybackState: true,
+  lyricsFontSize: "md",
+  skipSeconds: 5,
+  checkDuplicates: true,
+  confirmDelete: true,
+  sortBy: "newest",
+  lastSongId: null,
+  lastSongTime: 0,
+  importConvertMp3: false,
+  importConvertJpg: false,
+  githubRepo: "",
+  githubToken: "",
+};
+
+const GRADIENTS = [
+  "linear-gradient(135deg, #4c1d95, #1e1b4b)",
+  "linear-gradient(135deg, #1e3a8a, #172554)",
+  "linear-gradient(135deg, #701a75, #3b0764)",
+  "linear-gradient(135deg, #0f766e, #134e4a)",
+  "linear-gradient(135deg, #9f1239, #4c0519)",
+  "linear-gradient(135deg, #3730a3, #0f172a)",
+  "linear-gradient(135deg, #1d4ed8, #312e81)",
+  "linear-gradient(135deg, #6d28d9, #0f172a)",
+];
+
+function loadLocalSettings() {
+  try {
+    const raw = localStorage.getItem("songapp_mobile_settings");
+    if (raw) return { ...DEFAULT_SETTINGS, ...JSON.parse(raw) };
+  } catch {}
+  return { ...DEFAULT_SETTINGS };
+}
+
+const state = {
+  songs: [],
+  playlists: [],
+  activeTab: "Library",
+  activePlaylistId: null,
+  playQueuePlaylistId: null,
+  editingPlaylistId: null,
+  addToPlaylistSongId: null,
+  search: "",
+  searchFilter: "all",
+  viewMode: localStorage.getItem("songapp_mobile_view") || "list",
+  selectedId: null,
+  playingId: null,
+  editingId: null,
+  deletingId: null,
+  pendingAudioFile: null,
+  pendingCoverFile: null,
+  removeCoverFlag: false,
+  stagingToken: null,
+  serverAvailable: false,
+  offlineUrls: new Set(),
+  parsedLyrics: null,
+  renderedLyricsKey: "",
+  activeLyricIdx: -1,
+  syncMode: false,
+  syncLines: [],
+  syncCursor: -1,
+  pitchSemitones: 0,
+  reverbPercent: 0,
+  shuffle: false,
+  repeatMode: "off",
+  loopA: null,
+  loopB: null,
+  settings: loadLocalSettings(),
+  translationCache: {},
+  activeTranslationLang: null,
+  translationMode: "both",
+  translating: false,
+  npOpen: false,
+  npTab: "player",
+  fsLyricsOpen: false,
+  upNextQueue: [],
+  shuffleHistory: [],
+};
+
+const $ = (id) => document.getElementById(id);
+const on = (id, ev, fn) => $(id).addEventListener(ev, fn);
+const onEnter = (id, fn) => on(id, "keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); fn(); } });
+const audioEl = $("audioPlayer");
+
+let toastTimer = null;
+function showToast(msg, isError = false) {
+  const t = $("toast");
+  t.textContent = msg;
+  t.className = "toast show" + (isError ? " error" : "");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove("show"), 2700);
+}
+
+function escapeHtml(str) {
+  return String(str || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+function gradientFor(id) {
+  let h = 0;
+  const s = String(id || "x");
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+  return GRADIENTS[Math.abs(h) % GRADIENTS.length];
+}
+
+function formatTime(sec) {
+  if (!isFinite(sec) || sec < 0) return "0:00";
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+function formatLrcTime(sec) {
+  const s = Math.max(0, sec);
+  const m = Math.floor(s / 60);
+  const r = Math.floor(s % 60);
+  const cs = Math.floor((s - Math.floor(s)) * 100);
+  return `[${String(m).padStart(2, "0")}:${String(r).padStart(2, "0")}.${String(cs).padStart(2, "0")}]`;
+}
+
+function renderCoverHtml(song, iconSize = 26) {
+  if (state.settings.lightweightMode) return "";
+  if (song && song.coverFile) {
+    return `<img src="${escapeHtml(song.coverFile)}?v=${encodeURIComponent(song._ts || "")}" alt="" loading="lazy" />`;
+  }
+  return `<div style="width:100%;height:100%;background:${gradientFor(song?.id)};display:flex;align-items:center;justify-content:center;">
+    <svg width="${iconSize}" height="${iconSize}" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.75)" stroke-width="1.8">
+      <path d="M9 18V5l12-2v13"></path><circle cx="6" cy="18" r="3"></circle><circle cx="18" cy="16" r="3"></circle>
+    </svg>
+  </div>`;
+}
+
+function getSongById(id) {
+  return state.songs.find((s) => s.id === id) || null;
+}
+
+function getPlaylistSongs(plId) {
+  const pl = state.playlists.find((p) => p.id === plId);
+  if (!pl || !Array.isArray(pl.songIds)) return [];
+  const map = new Map(state.songs.map((s) => [s.id, s]));
+  return pl.songIds.map((id) => map.get(id)).filter(Boolean);
+}
+
+function sortSongsList(list) {
+  const sortBy = state.settings.sortBy || "newest";
+  const copy = [...list];
+  if (sortBy === "title") copy.sort((a, b) => (a.title || "").localeCompare(b.title || "", "cs"));
+  else if (sortBy === "artist") copy.sort((a, b) => (a.artist || "").localeCompare(b.artist || "", "cs"));
+  else if (sortBy === "lyrics") copy.sort((a, b) => (b.lyrics?.trim() ? 1 : 0) - (a.lyrics?.trim() ? 1 : 0));
+  return copy;
+}
+
+function isSongOffline(song) {
+  return Boolean(song && song.audioFile && state.offlineUrls.has(song.audioFile));
+}
+
+// ===================== OFFLINE CACHE & NETWORK INFO =====================
+const IS_NATIVE_ANDROID = Boolean(window.AndroidApp && typeof window.AndroidApp.isNative === "function" && window.AndroidApp.isNative());
+
+function notifyAndroidPlayback(playing) {
+  if (!IS_NATIVE_ANDROID) return;
+  const song = getSongById(state.playingId);
+  if (!song) {
+    try { window.AndroidApp.stopPlaybackNotification(); } catch {}
+    return;
+  }
+  try {
+    window.AndroidApp.updatePlaybackNotification(song.title || "Song App", song.artist || "Neznámý interpret", Boolean(playing));
+  } catch {}
+}
+
+window.handleAndroidBack = function () {
+  for (const id of ["duplicateModal", "deleteModal", "addToPlaylistModal", "playlistModal", "songModal", "actionSheet"]) {
+    const el = $(id);
+    if (el && el.classList.contains("open")) {
+      if (id === "songModal") closeSongModal();
+      else el.classList.remove("open");
+      return true;
+    }
+  }
+  if (state.fsLyricsOpen) { closeFsLyrics(); return true; }
+  if (state.npOpen) { closeNowPlaying(); return true; }
+  if (state.activeTab === "Playlists" && state.activePlaylistId) { closePlaylistDetail(); return true; }
+  if (state.activeTab !== "Library") { switchTab("Library"); return true; }
+  return false;
+};
+
+async function refreshOfflineCacheIndex() {
+  state.offlineUrls.clear();
+  $("offlineCountLabel").textContent = String(state.songs.length);
+}
+
+async function toggleOfflineSong(song) {
+  if (!song || !song.audioFile) { showToast("Tato písnička nemá audio soubor.", true); return; }
+  if (!("caches" in window)) { showToast("Offline cache není v tomto prohlížeči podporována.", true); return; }
+  const cache = await caches.open(OFFLINE_CACHE);
+  if (isSongOffline(song)) {
+    await cache.delete(song.audioFile);
+    if (song.coverFile) await cache.delete(song.coverFile);
+    await refreshOfflineCacheIndex();
+    renderAllSongLists();
+    renderNowPlayingHeaderAndActions();
+    showToast(`Odebráno z offline: ${song.title}`);
+  } else {
+    showToast(`Ukládám offline: ${song.title}...`);
+    try {
+      await cache.add(song.audioFile);
+      if (song.coverFile) await cache.add(song.coverFile).catch(() => {});
+      await refreshOfflineCacheIndex();
+      renderAllSongLists();
+      renderNowPlayingHeaderAndActions();
+      showToast(`Uloženo offline v mobilu: ${song.title}`);
+    } catch {
+      showToast("Nepodařilo se uložit offline (zkontroluj spojení).", true);
+    }
+  }
+}
+
+async function cacheAllOffline() {
+  if (!("caches" in window)) { showToast("Offline cache není podporována.", true); return; }
+  const playable = state.songs.filter((s) => s.audioFile);
+  if (!playable.length) { showToast("Žádné písničky s audiem.", true); return; }
+  const btn = $("cacheAllOfflineBtn");
+  btn.disabled = true;
+  let saved = 0;
+  try {
+    const cache = await caches.open(OFFLINE_CACHE);
+    for (let i = 0; i < playable.length; i++) {
+      const s = playable[i];
+      btn.textContent = `Ukládám ${i + 1}/${playable.length}...`;
+      if (!state.offlineUrls.has(s.audioFile)) {
+        try {
+          await cache.add(s.audioFile);
+          if (s.coverFile) await cache.add(s.coverFile).catch(() => {});
+          saved++;
+        } catch {}
+      }
+    }
+    await refreshOfflineCacheIndex();
+    renderAllSongLists();
+    showToast(`Hotovo! Offline připraveno ${state.songs.filter(isSongOffline).length} písniček (${saved} nových).`);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "📥 Uložit vše offline";
+  }
+}
+
+async function clearOfflineCache() {
+  if (!("caches" in window)) return;
+  await caches.delete(OFFLINE_CACHE);
+  await refreshOfflineCacheIndex();
+  renderAllSongLists();
+  renderNowPlayingHeaderAndActions();
+  showToast("Offline cache vymazána.");
+}
+
+async function loadNetworkInfo() {
+  try {
+    const res = await fetch("/api/app-info");
+    if (!res.ok) return;
+    const info = await res.json();
+    if (info.versionName) $("appVersionBadge").textContent = `v${info.versionName}`;
+    if (info.githubRepo && !state.settings.githubRepo) {
+      state.settings.githubRepo = info.githubRepo;
+      $("setGithubRepo").value = info.githubRepo;
+    }
+  } catch {}
+}
+
+let updatePollTimer = null;
+function setUpdateUi(text, progress = null, showInstall = false) {
+  $("updateStatusBox").style.display = "flex";
+  $("updateStatusText").textContent = text;
+  $("updateProgressTrack").style.display = progress !== null ? "block" : "none";
+  if (progress !== null) $("updateProgressFill").style.width = `${progress}%`;
+  $("installUpdateBtn").style.display = showInstall ? "inline-flex" : "none";
+}
+
+function triggerApkInstall() {
+  if (IS_NATIVE_ANDROID && typeof window.AndroidApp.installDownloadedUpdate === "function") {
+    window.AndroidApp.installDownloadedUpdate();
+  } else {
+    showToast("Instalace APK funguje přímo na Android mobilu.", true);
+  }
+}
+
+function startUpdatePolling(latestVersion) {
+  clearInterval(updatePollTimer);
+  updatePollTimer = setInterval(async () => {
+    try {
+      const r = await fetch("/api/update-status");
+      if (!r.ok) return;
+      const st = await r.json();
+      if (st.state === "downloading") {
+        const mbTxt = st.totalMb > 0 ? ` (${st.downloadedMb} / ${st.totalMb} MB)` : st.downloadedMb > 0 ? ` (${st.downloadedMb} MB)` : "";
+        setUpdateUi(`Stahuji aktualizaci v${latestVersion}... ${st.progress}%${mbTxt}`, st.progress, false);
+      } else if (st.state === "ready") {
+        clearInterval(updatePollTimer);
+        setUpdateUi(`Aktualizace v${latestVersion} stažena! Spouštím instalaci...`, 100, true);
+        $("checkUpdateBtn").disabled = false;
+        $("checkUpdateBtn").textContent = "🔄 Zkontrolovat aktualizace";
+        triggerApkInstall();
+      } else if (st.state === "error") {
+        clearInterval(updatePollTimer);
+        setUpdateUi(`Chyba stahování: ${st.error || "neznámá chyba"}`, null, false);
+        $("checkUpdateBtn").disabled = false;
+        $("checkUpdateBtn").textContent = "🔄 Zkontrolovat aktualizace";
+      }
+    } catch {}
+  }, 500);
+}
+
+async function checkForUpdates() {
+  const repo = ($("setGithubRepo").value || state.settings.githubRepo || "").trim();
+  const token = ($("setGithubToken").value || state.settings.githubToken || "").trim();
+  if (!repo) {
+    setUpdateUi("Nejprve vyplň GitHub repozitář (uzivatel/nazev) níže v Nastavení GitHub zdroje.", null, false);
+    document.querySelector(".update-config-details")?.setAttribute("open", "open");
+    return;
+  }
+  const btn = $("checkUpdateBtn");
+  btn.disabled = true;
+  btn.textContent = "Kontroluji...";
+  setUpdateUi("Kontroluji novou verzi na GitHubu...", null, false);
+  try {
+    const res = await fetch("/api/check-update", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ repo, token }),
+    });
+    const data = await res.json();
+    if (!res.ok || data.error) throw new Error(data.error || "Kontrola aktualizací se nezdařila.");
+
+    if (!data.hasUpdate) {
+      setUpdateUi(`✓ Máš nejnovější verzi (v${data.currentVersion}).`, null, false);
+      btn.disabled = false;
+      btn.textContent = "🔄 Zkontrolovat aktualizace";
+      showToast("Aplikace je aktuální!");
+      return;
+    }
+
+    const sizeTxt = data.apkSizeMb > 0 ? ` (${data.apkSizeMb} MB)` : "";
+    setUpdateUi(`Nalezena nová verze v${data.latestVersion}${sizeTxt}! Zahajuji automatické stahování...`, 0, false);
+    showToast(`Stahuji aktualizaci v${data.latestVersion}...`);
+
+    const dlRes = await fetch("/api/download-update", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ apkUrl: data.apkUrl, token, useApiAsset: Boolean(data.useApiAsset) }),
+    });
+    if (!dlRes.ok) throw new Error("Nepodařilo se spustit stahování aktualizace.");
+    startUpdatePolling(data.latestVersion);
+  } catch (err) {
+    setUpdateUi(`Chyba: ${err.message || "Nepodařilo se zkontrolovat aktualizace."}`, null, false);
+    btn.disabled = false;
+    btn.textContent = "🔄 Zkontrolovat aktualizace";
+  }
+}
+
+// ===================== NAVIGATION =====================
+function switchTab(tabName) {
+  state.activeTab = tabName;
+  ["Library", "Playlists", "Search", "Settings"].forEach((t) => {
+    $(`view${t}`).classList.toggle("active", t === tabName);
+  });
+  $("bottomNav").querySelectorAll(".nav-tab").forEach((b) => {
+    b.classList.toggle("active", b.dataset.tab === tabName);
+  });
+  if (tabName === "Search") $("searchInput").focus();
+  if (tabName === "Settings") { loadNetworkInfo(); refreshOfflineCacheIndex(); }
+}
+
+function openNowPlaying(tab = null) {
+  if (!state.playingId && !state.selectedId) {
+    showToast("Nejprve vyber písničku.", true);
+    return;
+  }
+  if (!state.selectedId) state.selectedId = state.playingId;
+  state.npOpen = true;
+  if (tab) setNpTab(tab);
+  $("nowPlayingSheet").classList.add("open");
+  renderNowPlaying();
+}
+
+function closeNowPlaying() {
+  state.npOpen = false;
+  $("nowPlayingSheet").classList.remove("open");
+}
+
+function setNpTab(tab) {
+  state.npTab = tab;
+  $("npTabs").querySelectorAll("button").forEach((b) => b.classList.toggle("active", b.dataset.npTab === tab));
+  $("npTabPlayer").classList.toggle("active", tab === "player");
+  $("npTabLyrics").classList.toggle("active", tab === "lyrics");
+  $("npTabFx").classList.toggle("active", tab === "fx");
+  if (tab === "lyrics") {
+    const song = getSongById(state.playingId || state.selectedId);
+    if (song) renderLyricsView(song, false);
+  }
+  if (tab === "fx") renderUpNextList();
+}
+
+// ===================== RENDER SONG LISTS & PLAYLISTS =====================
+function songRowHtml(song, opts = {}) {
+  const isPlaying = state.playingId === song.id && !audioEl.paused;
+  const isCurrent = state.playingId === song.id;
+  const hasLrc = /\[\d{1,2}:\d{2}/.test(song.lyrics || "");
+  const hasLyrics = Boolean(song.lyrics && song.lyrics.trim());
+  const offline = isSongOffline(song);
+
+  const reorderHtml = opts.reorder ? `
+    <div class="reorder-btns">
+      <button type="button" class="reorder-btn" data-move="up" data-id="${escapeHtml(song.id)}" title="Posunout nahoru">▲</button>
+      <button type="button" class="reorder-btn" data-move="down" data-id="${escapeHtml(song.id)}" title="Posunout dolů">▼</button>
+    </div>` : "";
+
+  return `
+    <div class="song-row${isCurrent ? " playing" : ""}" data-song-id="${escapeHtml(song.id)}">
+      <div class="row-cover">${renderCoverHtml(song, 22)}</div>
+      <div class="row-info">
+        <div class="row-title"><span class="ellipsis">${isPlaying ? "▶ " : ""}${escapeHtml(song.title || "Bez názvu")}</span></div>
+        <div class="row-artist ellipsis">${escapeHtml(song.artist || "Neznámý interpret")}${song.album ? ` • ${escapeHtml(song.album)}` : ""}</div>
+        <div class="row-badges">
+          ${hasLrc ? `<span class="tiny-badge synced">LRC</span>` : hasLyrics ? `<span class="tiny-badge">Lyrics</span>` : ""}
+          ${offline ? `<span class="tiny-badge offline">Offline</span>` : ""}
+        </div>
+      </div>
+      ${reorderHtml}
+      <button type="button" class="more-btn" data-more-id="${escapeHtml(song.id)}" title="Možnosti">⋮</button>
+    </div>`;
+}
+
+function songCardHtml(song) {
+  const isPlaying = state.playingId === song.id && !audioEl.paused;
+  const isCurrent = state.playingId === song.id;
+  return `
+    <div class="song-card${isCurrent ? " playing" : ""}" data-song-id="${escapeHtml(song.id)}">
+      <div class="card-cover">
+        ${renderCoverHtml(song, 34)}
+        <button type="button" class="card-play-fab" data-play-id="${escapeHtml(song.id)}" title="Přehrát">
+          ${isPlaying
+            ? `<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"></rect><rect x="14" y="4" width="4" height="16"></rect></svg>`
+            : `<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><polygon points="6 4 20 12 6 20 6 4"></polygon></svg>`}
+        </button>
+      </div>
+      <div class="card-meta-row">
+        <div class="card-meta">
+          <div class="card-title ellipsis">${escapeHtml(song.title || "Bez názvu")}</div>
+          <div class="card-artist ellipsis">${escapeHtml(song.artist || "Neznámý interpret")}</div>
+        </div>
+        <button type="button" class="more-btn" data-more-id="${escapeHtml(song.id)}" title="Možnosti">⋮</button>
+      </div>
+    </div>`;
+}
+
+function renderLibrary() {
+  const list = sortSongsList(state.songs);
+  $("libraryCountLabel").textContent = `${state.songs.length} písniček`;
+  const container = $("librarySongs");
+  if (list.length === 0) {
+    container.className = "";
+    container.innerHTML = `<div class="empty-state">Zatím tu nejsou žádné písničky.<br/>Klepni nahoře na <strong>+ Přidat</strong>.</div>`;
+    return;
+  }
+  const useList = state.settings.lightweightMode || state.viewMode === "list";
+  container.className = useList ? "songs-list" : "songs-grid";
+  container.innerHTML = useList ? list.map((s) => songRowHtml(s)).join("") : list.map(songCardHtml).join("");
+  $("viewToggleIcon").innerHTML = useList
+    ? `<rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect>`
+    : `<line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line>`;
+}
+
+function renderPlaylists() {
+  $("playlistsCountLabel").textContent = `${state.playlists.length} playlistů`;
+  const listEl = $("playlistsList");
+  if (state.playlists.length === 0) {
+    listEl.innerHTML = `<div class="empty-state">Zatím nemáš žádný playlist.<br/>Klepni na <strong>+ Nový</strong>.</div>`;
+  } else {
+    listEl.innerHTML = state.playlists.map((pl) => {
+      const songs = getPlaylistSongs(pl.id);
+      const firstCover = songs.find((s) => s.coverFile);
+      return `
+        <div class="playlist-card" data-open-pl="${escapeHtml(pl.id)}">
+          <div class="playlist-thumb" style="background:${gradientFor(pl.id)}">
+            ${firstCover && !state.settings.lightweightMode ? `<img src="${escapeHtml(firstCover.coverFile)}" alt="" />` : "🎵"}
+          </div>
+          <div class="playlist-meta">
+            <div class="playlist-name ellipsis">${escapeHtml(pl.name)}</div>
+            <div class="playlist-count">${songs.length} písniček</div>
+          </div>
+          <button type="button" class="icon-pill" data-play-pl="${escapeHtml(pl.id)}" title="Přehrát">▶</button>
+        </div>`;
+    }).join("");
+  }
+
+  if (state.activePlaylistId) {
+    const pl = state.playlists.find((p) => p.id === state.activePlaylistId);
+    if (!pl) { closePlaylistDetail(); return; }
+    const songs = getPlaylistSongs(pl.id);
+    $("plDetailName").textContent = pl.name;
+    $("plDetailCount").textContent = `${songs.length} písniček`;
+    $("playlistSongsList").className = "songs-list";
+    $("playlistSongsList").innerHTML = songs.length
+      ? songs.map((s) => songRowHtml(s, { reorder: true })).join("")
+      : `<div class="empty-state">Tento playlist je zatím prázdný.<br/>Přidej písničky přes tlačítko <strong>⋮</strong> v knihovně.</div>`;
+  }
+}
+
+function openPlaylistDetail(plId) {
+  state.activePlaylistId = plId;
+  $("playlistsHome").style.display = "none";
+  $("playlistDetail").style.display = "flex";
+  renderPlaylists();
+}
+
+function closePlaylistDetail() {
+  state.activePlaylistId = null;
+  $("playlistDetail").style.display = "none";
+  $("playlistsHome").style.display = "flex";
+}
+
+function renderSearch() {
+  const q = state.search.trim().toLowerCase();
+  const f = state.searchFilter;
+  $("clearSearchBtn").style.display = q ? "block" : "none";
+  let list = state.songs.filter((s) => {
+    if (f === "lyrics" && !(s.lyrics && s.lyrics.trim())) return false;
+    if (f === "audio" && !s.audioFile) return false;
+    if (f === "offline" && !isSongOffline(s)) return false;
+    if (!q) return true;
+    return [s.title, s.artist, s.album, s.lyrics].some((v) => String(v || "").toLowerCase().includes(q));
+  });
+  list = sortSongsList(list);
+  const el = $("searchResults");
+  el.className = "songs-list";
+  el.innerHTML = list.length
+    ? list.map((s) => songRowHtml(s)).join("")
+    : `<div class="empty-state">Nic neodpovídá hledání.</div>`;
+}
+
+function renderAllSongLists() {
+  renderLibrary();
+  renderPlaylists();
+  renderSearch();
+}
+
+// ===================== LYRICS PARSING (MULTI-PASS DEDUP + SORT) =====================
+function parseLyrics(rawText) {
+  const rawLines = String(rawText || "").replace(/\r\n/g, "\n").split("\n");
+  const timeTagRe = /\[(\d{1,2}):(\d{2})(?:[.:](\d{1,3}))?\]/g;
+  const metaTagRe = /^\[(ti|ar|al|by|length|re|ve):.*\]$/i;
+  const offsetRe = /^\[offset:\s*([+-]?\d+)\s*\]$/i;
+
+  let offsetSec = 0;
+  let hasTimestamps = false;
+  const passes = [[]];
+  let lastLineFirstTime = -1;
+  const plainLines = [];
+
+  for (const raw of rawLines) {
+    const trimmed = raw.trim();
+    const offMatch = trimmed.match(offsetRe);
+    if (offMatch) { offsetSec = Number(offMatch[1]) / 1000; continue; }
+    if (metaTagRe.test(trimmed)) continue;
+
+    const matches = [...raw.matchAll(timeTagRe)];
+    if (matches.length > 0) {
+      hasTimestamps = true;
+      const cleanText = raw.replace(timeTagRe, "").trim();
+      const times = matches.map((m) => {
+        const min = parseInt(m[1], 10);
+        const sec = parseInt(m[2], 10);
+        const fracStr = m[3] || "0";
+        const frac = parseInt(fracStr, 10) / Math.pow(10, fracStr.length);
+        return Math.max(0, min * 60 + sec + frac + offsetSec);
+      });
+      if (lastLineFirstTime >= 0 && times[0] + 15 < lastLineFirstTime && passes[passes.length - 1].length >= 4) {
+        passes.push([]);
+      }
+      lastLineFirstTime = times[0];
+      for (const t of times) {
+        if (cleanText !== "") passes[passes.length - 1].push({ text: cleanText, time: t, isEmpty: false });
+      }
+    } else {
+      plainLines.push({ text: trimmed, time: null, isEmpty: trimmed === "" });
+    }
+  }
+
+  if (hasTimestamps) {
+    const primaryPass = passes[0];
+    let combined = [...primaryPass];
+    for (let p = 1; p < passes.length; p++) {
+      const pass = passes[p];
+      if (!pass.length) continue;
+      if (pass.length >= 4 && primaryPass.length >= 4) {
+        let overlap = 0;
+        for (const item of pass) {
+          if (primaryPass.some((b) => Math.abs(b.time - item.time) <= 1.5)) overlap++;
+        }
+        if (overlap / pass.length >= 0.45) continue;
+      }
+      combined = combined.concat(pass);
+    }
+    combined.sort((a, b) => a.time - b.time);
+    const deduped = [];
+    for (const item of combined) {
+      const prev = deduped[deduped.length - 1];
+      if (prev && Math.abs(prev.time - item.time) <= 0.5 && prev.text.toLowerCase() === item.text.toLowerCase()) continue;
+      deduped.push(item);
+    }
+    return { mode: "lrc", lines: deduped };
+  }
+
+  const nonEmpty = plainLines.filter((l) => !l.isEmpty);
+  if (nonEmpty.length >= 8 && nonEmpty.length % 2 === 0) {
+    const half = nonEmpty.length / 2;
+    let same = 0;
+    for (let i = 0; i < half; i++) {
+      if (nonEmpty[i].text.toLowerCase() === nonEmpty[i + half].text.toLowerCase()) same++;
+    }
+    if (same / half >= 0.8) {
+      const trimmedPlain = [];
+      let seen = 0;
+      for (const l of plainLines) {
+        trimmedPlain.push(l);
+        if (!l.isEmpty && ++seen >= half) break;
+      }
+      return { mode: "plain", lines: trimmedPlain };
+    }
+  }
+  return { mode: "plain", lines: plainLines };
+}
+
+function computeAutoTimes(lines, duration) {
+  if (!isFinite(duration) || duration <= 0) return null;
+  const startMargin = Math.min(8, duration * 0.04);
+  const endMargin = Math.min(6, duration * 0.03);
+  const usable = Math.max(1, duration - startMargin - endMargin);
+  const weights = lines.map((l) => (l.isEmpty ? 10 : Math.max(14, l.text.length)));
+  const totalWeight = weights.reduce((a, b) => a + b, 0) || 1;
+  let acc = 0;
+  return lines.map((l, i) => { const t = startMargin + (acc / totalWeight) * usable; acc += weights[i]; return t; });
+}
+
+function findNextNonEmptyIndex(lines, fromIdx) {
+  for (let i = fromIdx; i < lines.length; i++) if (!lines[i].isEmpty) return i;
+  return -1;
+}
+
+// ===================== TRANSLATION (NON-BLOCKING, NO DISK CACHE) =====================
+function getSelectedTranslateLang() {
+  const v = $("translateLangSelect").value;
+  if (v === "custom") {
+    const raw = ($("customLangInput").value || "").trim().toLowerCase();
+    return /^[a-z]{2,5}(-[a-z]{2,4})?$/.test(raw) ? raw : "";
+  }
+  return v;
+}
+
+function getTranslationCacheKey(song, lang) {
+  return `${song.id}::${lang}::${song.lyrics || ""}`;
+}
+
+async function fetchLyricsTranslation(song, targetLang) {
+  const parsed = state.parsedLyrics && (state.playingId || state.selectedId) === song.id ? state.parsedLyrics : parseLyrics(song.lyrics);
+  const nonEmptyIndices = [];
+  const textsToSend = [];
+  parsed.lines.forEach((l, idx) => {
+    if (!l.isEmpty) { nonEmptyIndices.push(idx); textsToSend.push(l.text); }
+  });
+  if (!textsToSend.length) return null;
+
+  const res = await fetch("/api/translate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ songId: song.id, source: "auto", target: targetLang, lines: textsToSend }),
+  });
+  if (!res.ok) throw new Error("Překlad se nezdařil");
+  const data = await res.json();
+  const trLines = Array.isArray(data.lines) ? data.lines : [];
+  const full = new Array(parsed.lines.length).fill("");
+  nonEmptyIndices.forEach((lineIdx, k) => {
+    full[lineIdx] = trLines[k] !== undefined ? trLines[k] : parsed.lines[lineIdx].text;
+  });
+  return full;
+}
+
+async function translateCurrentLyrics() {
+  const song = getSongById(state.playingId || state.selectedId);
+  if (!song || !song.lyrics || !song.lyrics.trim()) return;
+  if (!state.serverAvailable) { showToast("Pro překlad musí běžet server na PC.", true); return; }
+
+  const targetLang = getSelectedTranslateLang();
+  if (!targetLang) { showToast("Zadej platný kód jazyka (např. de, es, pl, ja).", true); $("customLangInput").focus(); return; }
+
+  const cacheKey = getTranslationCacheKey(song, targetLang);
+  if (state.translationCache[cacheKey]) {
+    state.activeTranslationLang = targetLang;
+    state.translationMode = state.settings.defaultTranslationMode || "both";
+    renderLyricsView(song, true);
+    if (state.fsLyricsOpen) renderFsLyrics(true);
+    return;
+  }
+
+  const btn = $("translateBtn");
+  state.translating = true;
+  btn.disabled = true;
+  btn.textContent = "Překládám...";
+  try {
+    const full = await fetchLyricsTranslation(song, targetLang);
+    if (!full) return;
+    state.translationCache[cacheKey] = full;
+    state.activeTranslationLang = targetLang;
+    state.translationMode = state.settings.defaultTranslationMode || "both";
+    renderLyricsView(song, true);
+    if (state.fsLyricsOpen) renderFsLyrics(true);
+    showToast("Lyrics přeloženy!");
+  } catch (err) {
+    showToast(err.message || "Chyba při překladu", true);
+  } finally {
+    state.translating = false;
+    btn.disabled = false;
+    btn.textContent = "Přeložit";
+  }
+}
+
+let autoTranslatingKey = "";
+let autoTranslateTimer = null;
+function scheduleAutoTranslate(song) {
+  if (!song || !song.lyrics || !song.lyrics.trim()) return;
+  if (!state.serverAvailable || !state.activeTranslationLang || state.translationMode === "original") return;
+  const cacheKey = getTranslationCacheKey(song, state.activeTranslationLang);
+  if (state.translationCache[cacheKey] || autoTranslatingKey === cacheKey) return;
+
+  clearTimeout(autoTranslateTimer);
+  const start = () => {
+    autoTranslateTimer = setTimeout(async () => {
+      if ((state.playingId || state.selectedId) !== song.id) return;
+      const targetLang = state.activeTranslationLang;
+      if (!targetLang || state.translationCache[cacheKey] || autoTranslatingKey === cacheKey) return;
+      autoTranslatingKey = cacheKey;
+      try {
+        const full = await fetchLyricsTranslation(song, targetLang);
+        if (full) {
+          state.translationCache[cacheKey] = full;
+          if ((state.playingId || state.selectedId) === song.id) {
+            renderLyricsView(song, true);
+            if (state.fsLyricsOpen) renderFsLyrics(true);
+          }
+        }
+      } catch {}
+      finally { if (autoTranslatingKey === cacheKey) autoTranslatingKey = ""; }
+    }, 450);
+  };
+
+  if (state.playingId === song.id && audioEl.readyState < 3 && !audioEl.paused) {
+    audioEl.addEventListener("canplay", start, { once: true });
+  } else if (state.playingId === song.id && audioEl.readyState < 3) {
+    audioEl.addEventListener("playing", start, { once: true });
+  } else {
+    start();
+  }
+}
+
+// ===================== RENDER LYRICS & SYNC MODE =====================
+function renderLyricsView(song, forceRebuild = false) {
+  const lyricsEl = $("detailLyrics");
+  const badgeEl = $("syncBadge");
+  const syncBtn = $("syncLyricsBtn");
+  const toolbar = $("syncToolbar");
+  const trBar = $("translateBar");
+  const trModes = $("translateModes");
+
+  if (!song || !song.lyrics || !song.lyrics.trim()) {
+    badgeEl.style.display = "none";
+    syncBtn.style.display = "none";
+    toolbar.classList.remove("active");
+    trBar.classList.remove("visible");
+    state.parsedLyrics = null;
+    state.renderedLyricsKey = "";
+    lyricsEl.innerHTML = `<div class="empty-state">Tato písnička zatím nemá lyrics.<br/>Klepni nahoře na <strong>🔍 Najít lyrics</strong>.</div>`;
+    return;
+  }
+
+  if (state.syncMode) {
+    toolbar.classList.add("active");
+    trBar.classList.remove("visible");
+    badgeEl.style.display = "none";
+    syncBtn.style.display = "none";
+    lyricsEl.innerHTML = state.syncLines.map((l, i) => {
+      if (!l.text) return `<div class="lyric-gap"></div>`;
+      const cls = i === state.syncCursor ? "sync-current" : l.time !== null ? "sync-done" : "";
+      const tag = l.time !== null ? `<span class="lyric-time">${formatTime(l.time)}</span>` : "";
+      return `<div class="lyric-line ${cls}" data-lyric-idx="${i}"><span>${escapeHtml(l.text)}</span>${tag}</div>`;
+    }).join("");
+    const curEl = lyricsEl.querySelector(`[data-lyric-idx="${state.syncCursor}"]`);
+    if (curEl) curEl.scrollIntoView({ behavior: "smooth", block: "center" });
+    return;
+  }
+
+  toolbar.classList.remove("active");
+  trBar.classList.add("visible");
+
+  const selectedLang = getSelectedTranslateLang();
+  const cacheKey = selectedLang ? getTranslationCacheKey(song, selectedLang) : "";
+  const cachedLines = cacheKey ? state.translationCache[cacheKey] : null;
+  const showTr = Boolean(cachedLines && state.activeTranslationLang === selectedLang && state.translationMode !== "original");
+
+  trModes.classList.toggle("visible", Boolean(cachedLines && state.activeTranslationLang === selectedLang));
+  trModes.querySelectorAll("button").forEach((b) => b.classList.toggle("active", b.dataset.trMode === state.translationMode));
+
+  const key = `${song.id}::${song.lyrics}::${showTr ? `${selectedLang}:${state.translationMode}` : "orig"}`;
+  if (forceRebuild || state.renderedLyricsKey !== key) {
+    state.parsedLyrics = parseLyrics(song.lyrics);
+    state.renderedLyricsKey = key;
+    state.activeLyricIdx = -1;
+
+    const isLrc = state.parsedLyrics.mode === "lrc";
+    badgeEl.style.display = "inline-flex";
+    badgeEl.className = "sync-badge " + (isLrc ? "synced" : "auto");
+    badgeEl.textContent = isLrc ? "✓" : "✕";
+    syncBtn.style.display = song.audioFile ? "inline-flex" : "none";
+    syncBtn.textContent = isLrc ? "⏱️ Přesync" : "⏱️ Sync";
+
+    lyricsEl.innerHTML = state.parsedLyrics.lines.map((line, i) => {
+      if (line.isEmpty) return `<div class="lyric-gap"></div>`;
+      const timeTag = line.time !== null ? `<span class="lyric-time">${formatTime(line.time)}</span>` : "";
+      if (showTr && cachedLines[i]) {
+        if (state.translationMode === "only") {
+          return `<div class="lyric-line" data-lyric-idx="${i}"><span>${escapeHtml(cachedLines[i])}</span>${timeTag}</div>`;
+        }
+        return `<div class="lyric-line" data-lyric-idx="${i}"><div class="lyric-text-wrap"><span>${escapeHtml(line.text)}</span><span class="lyric-sub">${escapeHtml(cachedLines[i])}</span></div>${timeTag}</div>`;
+      }
+      return `<div class="lyric-line" data-lyric-idx="${i}"><span>${escapeHtml(line.text)}</span>${timeTag}</div>`;
+    }).join("");
+  }
+  updateActiveLyric(false);
+}
+
+function updateActiveLyric(shouldScroll = true) {
+  if (state.syncMode || !state.parsedLyrics) return;
+  const song = getSongById(state.playingId || state.selectedId);
+  if (!song || state.playingId !== song.id) return;
+
+  const lines = state.parsedLyrics.lines;
+  const t = audioEl.currentTime;
+  let activeIdx = -1;
+  if (state.parsedLyrics.mode === "lrc") {
+    for (let i = 0; i < lines.length; i++) {
+      if (!lines[i].isEmpty && lines[i].time !== null && lines[i].time <= t + 0.08) activeIdx = i;
+    }
+  } else {
+    const autoTimes = computeAutoTimes(lines, audioEl.duration);
+    if (autoTimes) {
+      for (let i = 0; i < lines.length; i++) {
+        if (!lines[i].isEmpty && autoTimes[i] <= t) activeIdx = i;
+      }
+    }
+  }
+
+  if (activeIdx === state.activeLyricIdx) return;
+  state.activeLyricIdx = activeIdx;
+
+  const lyricsEl = $("detailLyrics");
+  lyricsEl.querySelectorAll(".lyric-line").forEach((node) => {
+    const idx = Number(node.dataset.lyricIdx);
+    node.classList.toggle("active", idx === activeIdx);
+    node.classList.toggle("past", activeIdx >= 0 && idx < activeIdx);
+  });
+
+  if (shouldScroll && state.settings.autoScrollLyrics && activeIdx >= 0 && state.npOpen && state.npTab === "lyrics") {
+    const activeNode = lyricsEl.querySelector(`[data-lyric-idx="${activeIdx}"]`);
+    if (activeNode) activeNode.scrollIntoView({ behavior: state.settings.lightweightMode ? "auto" : "smooth", block: "center" });
+  }
+  if (state.fsLyricsOpen) syncFsActiveLyric(activeIdx, shouldScroll);
+}
+
+function startSyncMode() {
+  const song = getSongById(state.playingId || state.selectedId);
+  if (!song || !song.audioFile || !song.lyrics?.trim()) return;
+  const parsed = parseLyrics(song.lyrics);
+  state.syncLines = parsed.lines.map((l) => ({ text: l.text, time: null, isEmpty: l.isEmpty }));
+  state.syncCursor = findNextNonEmptyIndex(state.syncLines, 0);
+  state.syncMode = true;
+  if (state.playingId !== song.id) {
+    state.playingId = song.id;
+    audioEl.src = song.audioFile;
+    audioEl.currentTime = 0;
+  } else {
+    audioEl.currentTime = 0;
+  }
+  audioEl.play().catch(() => {});
+  renderLyricsView(song, true);
+}
+
+function stampNextSyncLine() {
+  if (!state.syncMode || state.syncCursor < 0) return;
+  state.syncLines[state.syncCursor].time = audioEl.currentTime;
+  state.syncCursor = findNextNonEmptyIndex(state.syncLines, state.syncCursor + 1);
+  const song = getSongById(state.playingId || state.selectedId);
+  renderLyricsView(song, true);
+  if (state.syncCursor < 0) showToast("Všechny řádky označeny! Klepni na Uložit.");
+}
+
+function undoSyncLine() {
+  if (!state.syncMode) return;
+  const start = state.syncCursor < 0 ? state.syncLines.length - 1 : state.syncCursor - 1;
+  for (let i = start; i >= 0; i--) {
+    if (!state.syncLines[i].isEmpty && state.syncLines[i].time !== null) {
+      state.syncLines[i].time = null;
+      state.syncCursor = i;
+      audioEl.currentTime = Math.max(0, audioEl.currentTime - 2);
+      renderLyricsView(getSongById(state.playingId || state.selectedId), true);
+      return;
+    }
+  }
+}
+
+async function saveSyncMode() {
+  const song = getSongById(state.playingId || state.selectedId);
+  if (!song) return;
+  const lrcText = state.syncLines.map((l) => (l.isEmpty ? "" : (l.time !== null ? `${formatLrcTime(l.time)} ${l.text}` : l.text))).join("\n");
+  try {
+    const res = await fetch(`/api/songs/${song.id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ lyrics: lrcText }),
+    });
+    if (!res.ok) throw new Error();
+    const updated = await res.json();
+    updated._ts = Date.now();
+    const idx = state.songs.findIndex((s) => s.id === updated.id);
+    if (idx >= 0) state.songs[idx] = updated;
+    state.syncMode = false;
+    state.renderedLyricsKey = "";
+    renderAllSongLists();
+    renderLyricsView(updated, true);
+    showToast("Synchronizované lyrics uloženy!");
+  } catch {
+    showToast("Nepodařilo se uložit synchronizaci.", true);
+  }
+}
+
+function cancelSyncMode() {
+  state.syncMode = false;
+  state.renderedLyricsKey = "";
+  const song = getSongById(state.playingId || state.selectedId);
+  if (song) renderLyricsView(song, true);
+}
+
+// ===================== FULLSCREEN LYRICS =====================
+let fsRenderedKey = "";
+let fsLastSongId = null;
+
+function renderFsLyrics(force = false) {
+  const song = getSongById(state.playingId || state.selectedId);
+  if (!song) return;
+  const songChanged = fsLastSongId !== song.id;
+  fsLastSongId = song.id;
+  $("fsTitle").textContent = song.title || "Bez názvu";
+  $("fsArtist").textContent = song.artist || "";
+  $("fsBgCover").style.backgroundImage = song.coverFile && !state.settings.lightweightMode ? `url("${song.coverFile}?v=${encodeURIComponent(song._ts || "")}")` : "none";
+  $("fsCoverMini").innerHTML = renderCoverHtml(song, 18);
+
+  const selectedLang = state.activeTranslationLang || getSelectedTranslateLang();
+  const cacheKey = selectedLang ? getTranslationCacheKey(song, selectedLang) : "";
+  const cachedLines = cacheKey ? state.translationCache[cacheKey] : null;
+  const showTr = Boolean(cachedLines && state.activeTranslationLang === selectedLang && state.translationMode !== "original");
+
+  const key = `${song.id}::${song.lyrics || ""}::${showTr ? `${selectedLang}:${state.translationMode}` : "orig"}`;
+  if (force || fsRenderedKey !== key) {
+    fsRenderedKey = key;
+    if (!song.lyrics?.trim()) {
+      $("fsLyricsContent").innerHTML = `<div class="fs-lyric-line" style="cursor:default;">Tato písnička nemá zadané lyrics.</div>`;
+    } else {
+      const parsed = state.parsedLyrics && (state.playingId || state.selectedId) === song.id ? state.parsedLyrics : parseLyrics(song.lyrics);
+      $("fsLyricsContent").innerHTML = parsed.lines.map((line, i) => {
+        if (line.isEmpty) return `<div class="fs-lyric-gap"></div>`;
+        if (showTr && cachedLines[i]) {
+          if (state.translationMode === "only") return `<div class="fs-lyric-line" data-fs-idx="${i}">${escapeHtml(cachedLines[i])}</div>`;
+          return `<div class="fs-lyric-line" data-fs-idx="${i}">${escapeHtml(line.text)}<span class="fs-lyric-sub">${escapeHtml(cachedLines[i])}</span></div>`;
+        }
+        return `<div class="fs-lyric-line" data-fs-idx="${i}">${escapeHtml(line.text)}</div>`;
+      }).join("");
+    }
+    if (songChanged) $("fsLyricsScroll").scrollTop = 0;
+  }
+  syncFsActiveLyric(state.activeLyricIdx, false);
+  const playing = !audioEl.paused;
+  $("fsPlayIcon").style.display = playing ? "none" : "block";
+  $("fsPauseIcon").style.display = playing ? "block" : "none";
+  syncVolumeUI(audioEl.muted ? 0 : audioEl.volume);
+}
+
+function syncFsActiveLyric(activeIdx, shouldScroll = true) {
+  if (!state.fsLyricsOpen) return;
+  const nodes = $("fsLyricsContent").querySelectorAll(".fs-lyric-line[data-fs-idx]");
+  let activeNode = null;
+  nodes.forEach((n) => {
+    const isAct = Number(n.dataset.fsIdx) === activeIdx;
+    n.classList.toggle("active", isAct);
+    if (isAct) activeNode = n;
+  });
+  if (shouldScroll && activeNode && state.settings.autoScrollLyrics) {
+    activeNode.scrollIntoView({ behavior: state.settings.lightweightMode ? "auto" : "smooth", block: "center" });
+  }
+}
+
+function openFsLyrics() {
+  if (!getSongById(state.playingId || state.selectedId)) { showToast("Nejprve vyber písničku.", true); return; }
+  state.fsLyricsOpen = true;
+  $("fsLyricsOverlay").classList.add("open");
+  renderFsLyrics(true);
+}
+
+function closeFsLyrics() {
+  state.fsLyricsOpen = false;
+  $("fsLyricsOverlay").classList.remove("open");
+}
+
+// ===================== PLAYBACK, SHUFFLE (25-SONG COOLDOWN), QUEUE, A-B LOOP =====================
+function getPlayableQueue() {
+  const base = state.playQueuePlaylistId ? getPlaylistSongs(state.playQueuePlaylistId) : sortSongsList(state.songs);
+  return base.filter((s) => s.audioFile);
+}
+
+function togglePlaySong(id, queuePlaylistId = undefined, recordHistory = true) {
+  const song = getSongById(id);
+  if (!song || !song.audioFile) { showToast("Tato písnička nemá audio soubor.", true); return; }
+
+  if (queuePlaylistId !== undefined) state.playQueuePlaylistId = queuePlaylistId;
+  state.selectedId = id;
+
+  if (state.playingId === id) {
+    ensureAudioGraph();
+    if (audioEl.paused) audioEl.play().catch(() => {});
+    else audioEl.pause();
+    return;
+  }
+
+  state.playingId = id;
+  state.loopA = null;
+  state.loopB = null;
+  if (recordHistory) {
+    state.shuffleHistory = state.shuffleHistory.filter((x) => x !== id);
+    state.shuffleHistory.push(id);
+    if (state.shuffleHistory.length > 60) state.shuffleHistory.shift();
+  }
+
+  ensureAudioGraph();
+  audioEl.src = song.audioFile;
+  applyPitchRate();
+  audioEl.play().catch(() => {});
+  applyDynamicColor(song);
+  renderAllSongLists();
+  renderPlayer();
+  renderNowPlaying();
+  if (state.fsLyricsOpen) renderFsLyrics(true);
+  updateMediaSession(song);
+  scheduleAutoTranslate(song);
+}
+
+function playAdjacent(step, isAutoEnd = false) {
+  if (isAutoEnd && state.repeatMode === "one" && state.playingId) {
+    audioEl.currentTime = 0;
+    audioEl.play().catch(() => {});
+    return;
+  }
+  if (step > 0 && state.upNextQueue.length > 0) {
+    const nextId = state.upNextQueue.shift();
+    renderQueuePill();
+    renderUpNextList();
+    if (getSongById(nextId)?.audioFile) { togglePlaySong(nextId); return; }
+  }
+
+  const playable = getPlayableQueue();
+  if (!playable.length) return;
+
+  if (state.shuffle && step > 0) {
+    const cooldown = Math.min(25, Math.max(0, playable.length - 1));
+    const recent = new Set(state.shuffleHistory.slice(-cooldown));
+    if (state.playingId) recent.add(state.playingId);
+    let candidates = playable.filter((s) => !recent.has(s.id));
+    if (!candidates.length) candidates = playable.filter((s) => s.id !== state.playingId);
+    if (!candidates.length) candidates = playable;
+    const pick = candidates[Math.floor(Math.random() * candidates.length)];
+    togglePlaySong(pick.id);
+    return;
+  }
+
+  const curIdx = playable.findIndex((s) => s.id === state.playingId);
+  let nextIdx = curIdx < 0 ? 0 : curIdx + step;
+  if (nextIdx >= playable.length) {
+    if (state.repeatMode === "all" || !isAutoEnd) nextIdx = 0;
+    else return;
+  }
+  if (nextIdx < 0) nextIdx = playable.length - 1;
+  togglePlaySong(playable[nextIdx].id);
+}
+
+function enqueueUpNext(songId) {
+  const song = getSongById(songId);
+  if (!song || !song.audioFile) { showToast("Písnička nemá audio.", true); return; }
+  state.upNextQueue.push(songId);
+  renderQueuePill();
+  renderUpNextList();
+  showToast(`Zařazeno jako další: ${song.title}`);
+}
+
+function renderQueuePill() {
+  const n = state.upNextQueue.length;
+  $("queuePill").style.display = n > 0 ? "inline-flex" : "none";
+  $("queuePillCount").textContent = String(n);
+}
+
+function renderUpNextList() {
+  const el = $("upNextList");
+  if (!state.upNextQueue.length) {
+    el.innerHTML = `<div class="fx-sub">Fronta je prázdná. Přidej skladbu přes menu <strong>⋮</strong>.</div>`;
+    return;
+  }
+  el.innerHTML = state.upNextQueue.map((id, idx) => {
+    const s = getSongById(id);
+    if (!s) return "";
+    return `<div class="upnext-item"><span class="ellipsis">${idx + 1}. ${escapeHtml(s.title)}</span><button type="button" class="btn btn-secondary btn-xs" data-remove-q="${idx}">✕</button></div>`;
+  }).join("");
+}
+
+function renderAbLoop() {
+  const dur = audioEl.duration;
+  const hasA = state.loopA !== null;
+  const hasB = state.loopB !== null;
+  $("abLoopBtn").classList.toggle("active", hasA);
+  $("abLoopBtnText").textContent = !hasA ? "A–B" : !hasB ? `A: ${formatTime(state.loopA)}` : `${formatTime(state.loopA)}–${formatTime(state.loopB)}`;
+  $("abLoopBtnFx").textContent = !hasA ? "Nastavit A" : !hasB ? "Nastavit B" : "Zrušit A–B";
+  $("abLoopStatus").textContent = !hasA
+    ? "Vypnuto – nastav bod A a B pro opakování části skladby."
+    : !hasB
+      ? `Bod A nastaven na ${formatTime(state.loopA)}. Klepni pro nastavení bodu B.`
+      : `Aktivní smyčka: ${formatTime(state.loopA)} → ${formatTime(state.loopB)}`;
+  $("abLoopBadge").style.display = hasA ? "inline" : "none";
+  $("abLoopBadge").textContent = hasB ? `🔁 ${formatTime(state.loopA)}–${formatTime(state.loopB)}` : hasA ? `🔁 A: ${formatTime(state.loopA)}` : "";
+  $("abMarkerA").style.display = hasA && isFinite(dur) && dur > 0 ? "block" : "none";
+  $("abMarkerB").style.display = hasB && isFinite(dur) && dur > 0 ? "block" : "none";
+  if (hasA && dur > 0) $("abMarkerA").style.left = `${(state.loopA / dur) * 100}%`;
+  if (hasB && dur > 0) $("abMarkerB").style.left = `${(state.loopB / dur) * 100}%`;
+}
+
+function handleAbLoopClick() {
+  if (!state.playingId || !isFinite(audioEl.duration)) { showToast("Nejprve spusť písničku.", true); return; }
+  if (state.loopA === null) {
+    state.loopA = audioEl.currentTime;
+    state.loopB = null;
+    showToast(`Bod A nastaven (${formatTime(state.loopA)})`);
+  } else if (state.loopB === null) {
+    const t = audioEl.currentTime;
+    if (t <= state.loopA + 0.4) { showToast("Bod B musí být až za bodem A.", true); return; }
+    state.loopB = t;
+    audioEl.currentTime = state.loopA;
+    showToast(`Smyčka A–B aktivní`);
+  } else {
+    state.loopA = null;
+    state.loopB = null;
+    showToast("Smyčka A–B zrušena");
+  }
+  renderAbLoop();
+}
+
+function enforceAbLoop() {
+  if (state.loopA !== null && state.loopB !== null && audioEl.currentTime >= state.loopB) {
+    audioEl.currentTime = state.loopA;
+  }
+}
+
+// ===================== RENDER PLAYER & NOW PLAYING =====================
+function renderPlayer() {
+  const song = getSongById(state.playingId);
+  const playing = Boolean(song && !audioEl.paused);
+
+  $("miniPlayer").style.display = song ? "block" : "none";
+  if (song) {
+    $("miniTitle").textContent = song.title || "Bez názvu";
+    $("miniArtist").textContent = song.artist || "Neznámý interpret";
+    const coverKey = `${song.id}::${song.coverFile || ""}::${song._ts || ""}::${state.settings.lightweightMode ? 1 : 0}`;
+    if ($("miniCover").dataset.coverKey !== coverKey) {
+      $("miniCover").dataset.coverKey = coverKey;
+      $("miniCover").innerHTML = renderCoverHtml(song, 20);
+    }
+  }
+  $("miniPlayIcon").style.display = playing ? "none" : "block";
+  $("miniPauseIcon").style.display = playing ? "block" : "none";
+  $("playIcon").style.display = playing ? "none" : "block";
+  $("pauseIcon").style.display = playing ? "block" : "none";
+  $("fsPlayIcon").style.display = playing ? "none" : "block";
+  $("fsPauseIcon").style.display = playing ? "block" : "none";
+
+  $("shuffleBtn").classList.toggle("active", state.shuffle);
+  $("repeatBtn").classList.toggle("active", state.repeatMode !== "off");
+  $("repeatOneDot").style.display = state.repeatMode === "one" ? "block" : "none";
+  renderAbLoop();
+  renderQueuePill();
+}
+
+function renderNowPlayingHeaderAndActions() {
+  const song = getSongById(state.playingId || state.selectedId);
+  const pl = state.playQueuePlaylistId ? state.playlists.find((p) => p.id === state.playQueuePlaylistId) : null;
+  $("npQueueLabel").textContent = pl ? pl.name : "Všechny písničky";
+  const off = isSongOffline(song);
+  $("npOfflineToggleBtn").textContent = off ? "✓" : "📥";
+  $("npOfflineToggleBtn").title = off ? "Uloženo offline (klepni pro odebrání)" : "Uložit offline do mobilu";
+}
+
+function renderNowPlaying() {
+  const song = getSongById(state.playingId || state.selectedId);
+  renderNowPlayingHeaderAndActions();
+  if (!song) return;
+
+  $("npTitle").textContent = song.title || "Bez názvu";
+  $("npArtist").textContent = [song.artist || "Neznámý interpret", song.album].filter(Boolean).join(" • ");
+  $("npBgBlur").style.backgroundImage = song.coverFile && !state.settings.lightweightMode ? `url("${song.coverFile}?v=${encodeURIComponent(song._ts || "")}")` : "none";
+
+  const coverKey = `${song.id}::${song.coverFile || ""}::${song._ts || ""}::${state.settings.lightweightMode ? 1 : 0}`;
+  if ($("npCoverBox").dataset.coverKey !== coverKey) {
+    $("npCoverBox").dataset.coverKey = coverKey;
+    $("npCoverBox").innerHTML = renderCoverHtml(song, 54);
+  }
+  renderLyricsView(song, false);
+  renderUpNextList();
+}
+
+// ===================== WEB AUDIO: PITCH, REVERB, VISUALIZER =====================
+let audioCtx = null, sourceNode = null, dryGain = null, wetGain = null, convolverNode = null, analyserNode = null, freqData = null;
+
+function buildReverbImpulse(ctx, seconds = 2.4, decay = 2.6) {
+  const len = Math.floor(ctx.sampleRate * seconds);
+  const impulse = ctx.createBuffer(2, len, ctx.sampleRate);
+  for (let ch = 0; ch < 2; ch++) {
+    const data = impulse.getChannelData(ch);
+    for (let i = 0; i < len; i++) data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, decay);
+  }
+  return impulse;
+}
+
+function ensureAudioGraph() {
+  if (state.settings.lightweightMode) return;
+  if (!audioCtx) {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    audioCtx = new AC();
+    sourceNode = audioCtx.createMediaElementSource(audioEl);
+    dryGain = audioCtx.createGain();
+    wetGain = audioCtx.createGain();
+    convolverNode = audioCtx.createConvolver();
+    convolverNode.buffer = buildReverbImpulse(audioCtx);
+    analyserNode = audioCtx.createAnalyser();
+    analyserNode.fftSize = 128;
+    analyserNode.smoothingTimeConstant = 0.8;
+    freqData = new Uint8Array(analyserNode.frequencyBinCount);
+
+    sourceNode.connect(dryGain);
+    sourceNode.connect(convolverNode);
+    convolverNode.connect(wetGain);
+    dryGain.connect(analyserNode);
+    wetGain.connect(analyserNode);
+    analyserNode.connect(audioCtx.destination);
+    applyReverb();
+  }
+  if (audioCtx && audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+}
+
+function applyPitchRate() {
+  const st = Math.round(Number(state.pitchSemitones) || 0);
+  state.pitchSemitones = st;
+  audioEl.preservesPitch = false;
+  audioEl.mozPreservesPitch = false;
+  audioEl.webkitPreservesPitch = false;
+  audioEl.playbackRate = Math.pow(2, st / 12);
+  const label = `${st >= 0 ? "+" : ""}${st} st`;
+  $("pitchBar").value = st;
+  $("pitchValue").textContent = label;
+  $("fsPitchBar").value = st;
+  $("fsPitchVal").textContent = label;
+  updateQuickFxBadge();
+}
+
+function applyReverb() {
+  const pct = state.settings.lightweightMode ? 0 : Math.max(0, Math.min(100, Number(state.reverbPercent) || 0));
+  $("reverbBar").value = state.reverbPercent;
+  $("reverbValue").textContent = `${state.reverbPercent}%`;
+  $("fsReverbBar").value = state.reverbPercent;
+  $("fsReverbVal").textContent = `${state.reverbPercent}%`;
+  if (dryGain && wetGain && audioCtx) {
+    const wet = (pct / 100) * 0.85;
+    dryGain.gain.setTargetAtTime(Math.max(0.25, 1 - wet * 0.55), audioCtx.currentTime, 0.02);
+    wetGain.gain.setTargetAtTime(wet, audioCtx.currentTime, 0.02);
+  }
+  updateQuickFxBadge();
+}
+
+function updateQuickFxBadge() {
+  const parts = [];
+  if (state.pitchSemitones !== 0) parts.push(`${state.pitchSemitones > 0 ? "+" : ""}${state.pitchSemitones}st`);
+  if (state.reverbPercent > 0 && !state.settings.lightweightMode) parts.push(`Rev ${state.reverbPercent}%`);
+  $("npQuickFxLabel").textContent = parts.length ? parts.join(" • ") : "FX";
+  $("npQuickFxBtn").classList.toggle("active", parts.length > 0);
+}
+
+function setPitch(val) {
+  state.pitchSemitones = Number(val) || 0;
+  applyPitchRate();
+  if (state.settings.rememberAudioFx) { state.settings.lastPitch = state.pitchSemitones; saveSettings(); }
+}
+
+function setReverb(val) {
+  if (Number(val) > 0) ensureAudioGraph();
+  state.reverbPercent = Number(val) || 0;
+  applyReverb();
+  if (state.settings.rememberAudioFx) { state.settings.lastReverb = state.reverbPercent; saveSettings(); }
+}
+
+function syncVolumeUI(shownVol) {
+  const pct = Math.round(shownVol * 100);
+  $("volumeBar").value = shownVol;
+  $("volumeLabel").textContent = `${pct}%`;
+  $("fsVolumeBar").value = shownVol;
+  $("fsVolumeVal").textContent = `${pct}%`;
+  $("muteBtn").textContent = audioEl.muted || pct === 0 ? "Zapnout zvuk" : "Ztlumit";
+  $("fsMuteBtn").textContent = audioEl.muted || pct === 0 ? "🔇" : "🔊";
+}
+
+// Visualizer & 60fps loop
+let rafId = null;
+function releaseCanvas(id) {
+  const c = $(id);
+  if (c) { c.width = 0; c.height = 0; }
+}
+
+function clearVisualizers() {
+  ["bgVisualizerCanvas", "npVisualizerCanvas", "fsVisualizerCanvas"].forEach((id) => {
+    const c = $(id);
+    if (c && c.width > 0) c.getContext("2d").clearRect(0, 0, c.width, c.height);
+  });
+}
+
+function drawBarsToCanvas(id, rgb1, rgb2, alpha = 0.25) {
+  const c = $(id);
+  if (!c || !freqData) return;
+  const w = c.clientWidth, h = c.clientHeight;
+  if (!w || !h) return;
+  if (c.width !== w || c.height !== h) { c.width = w; c.height = h; }
+  const ctx = c.getContext("2d");
+  ctx.clearRect(0, 0, w, h);
+  const bars = 28;
+  const bw = w / bars;
+  const grad = ctx.createLinearGradient(0, h, 0, h * 0.45);
+  grad.addColorStop(0, `rgba(${rgb1}, ${alpha})`);
+  grad.addColorStop(1, `rgba(${rgb2}, ${alpha * 0.2})`);
+  ctx.fillStyle = grad;
+  for (let i = 0; i < bars; i++) {
+    const val = freqData[Math.min(freqData.length - 1, Math.floor((i / bars) * (freqData.length * 0.72)))] / 255;
+    const bh = Math.max(2, val * h * 0.42);
+    ctx.fillRect(i * bw + 2, h - bh, Math.max(2, bw - 4), bh);
+  }
+}
+
+function startAnimationLoop() {
+  if (state.settings.lightweightMode || document.hidden || rafId) return;
+  const tick = () => {
+    if (audioEl.paused || state.settings.lightweightMode || document.hidden) {
+      rafId = null;
+      clearVisualizers();
+      return;
+    }
+    enforceAbLoop();
+    updateActiveLyric(true);
+    const mode = state.settings.visualizerMode || "background";
+    if (mode !== "off" && analyserNode && freqData) {
+      analyserNode.getByteFrequencyData(freqData);
+      const cs = getComputedStyle(document.documentElement);
+      const rgb1 = cs.getPropertyValue("--accent-rgb").trim() || "139, 92, 246";
+      const rgb2 = cs.getPropertyValue("--accent2-rgb").trim() || "236, 72, 153";
+      if (state.fsLyricsOpen) {
+        drawBarsToCanvas("fsVisualizerCanvas", rgb1, rgb2, 0.34);
+      } else if (state.npOpen && (mode === "player" || mode === "both")) {
+        drawBarsToCanvas("npVisualizerCanvas", rgb1, rgb2, 0.3);
+      } else if (!state.npOpen && (mode === "background" || mode === "both")) {
+        drawBarsToCanvas("bgVisualizerCanvas", rgb1, rgb2, 0.24);
+      }
+    }
+    rafId = requestAnimationFrame(tick);
+  };
+  rafId = requestAnimationFrame(tick);
+}
+
+// ===================== DYNAMIC COVER-ART THEME =====================
+function rgbToHsl(r, g, b) {
+  r /= 255; g /= 255; b /= 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  let h = 0, s = 0, l = (max + min) / 2;
+  if (max !== min) {
+    const d = max - min;
+    s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+    if (max === r) h = (g - b) / d + (g < b ? 6 : 0);
+    else if (max === g) h = (b - r) / d + 2;
+    else h = (r - g) / d + 4;
+    h /= 6;
+  }
+  return [h * 360, s, l];
+}
+
+function hslToRgb(h, s, l) {
+  h = ((h % 360) + 360) % 360 / 360;
+  const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+  const p = 2 * l - q;
+  const f = (t) => {
+    if (t < 0) t += 1; if (t > 1) t -= 1;
+    if (t < 1 / 6) return p + (q - p) * 6 * t;
+    if (t < 1 / 2) return q;
+    if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+    return p;
+  };
+  return [Math.round(f(h + 1 / 3) * 255), Math.round(f(h) * 255), Math.round(f(h - 1 / 3) * 255)];
+}
+
+function setAccentColors(c1, c2) {
+  const root = document.documentElement;
+  root.style.setProperty("--accent", `rgb(${c1[0]}, ${c1[1]}, ${c1[2]})`);
+  root.style.setProperty("--accent-2", `rgb(${c2[0]}, ${c2[1]}, ${c2[2]})`);
+  root.style.setProperty("--accent-rgb", `${c1[0]}, ${c1[1]}, ${c1[2]}`);
+  root.style.setProperty("--accent2-rgb", `${c2[0]}, ${c2[1]}, ${c2[2]}`);
+}
+
+function resetDefaultAccent() {
+  setAccentColors([139, 92, 246], [236, 72, 153]);
+}
+
+function applyDynamicColor(song) {
+  if (state.settings.lightweightMode || state.settings.themeMode === "dark" || !song || !song.coverFile) {
+    resetDefaultAccent();
+    return;
+  }
+  const img = new Image();
+  img.crossOrigin = "anonymous";
+  img.onload = () => {
+    try {
+      const c = document.createElement("canvas");
+      c.width = 24; c.height = 24;
+      const ctx = c.getContext("2d");
+      ctx.drawImage(img, 0, 0, 24, 24);
+      const data = ctx.getImageData(0, 0, 24, 24).data;
+      const buckets = new Map();
+      for (let i = 0; i < data.length; i += 4) {
+        const [h, s, l] = rgbToHsl(data[i], data[i + 1], data[i + 2]);
+        if (l < 0.14 || l > 0.88 || s < 0.18) continue;
+        const bin = Math.floor(h / 20);
+        const cur = buckets.get(bin) || { count: 0, h: 0, s: 0, l: 0 };
+        cur.count += s * 1.5; cur.h += h; cur.s += s; cur.l += l;
+        buckets.set(bin, cur);
+      }
+      const sorted = [...buckets.values()].sort((a, b) => b.count - a.count);
+      if (!sorted.length) { resetDefaultAccent(); return; }
+      const p1 = sorted[0];
+      const h1 = p1.h / (p1.count / (p1.s / (p1.count || 1) * 1.5) || 1);
+      const rgb1 = hslToRgb(p1.h / Math.max(1, sorted[0].count / 1.1), Math.min(0.85, Math.max(0.55, p1.s / Math.max(1, p1.count))), 0.6);
+      const p2 = sorted.find((b) => Math.abs((b.h / Math.max(1, b.count)) - (p1.h / Math.max(1, p1.count))) > 35);
+      const rgb2 = p2
+        ? hslToRgb(p2.h / Math.max(1, p2.count / 1.1), 0.78, 0.58)
+        : hslToRgb((rgbToHsl(...rgb1)[0] + 42) % 360, 0.78, 0.58);
+      void h1;
+      setAccentColors(rgb1, rgb2);
+    } catch { resetDefaultAccent(); }
+  };
+  img.onerror = resetDefaultAccent;
+  img.src = `${song.coverFile}?v=${encodeURIComponent(song._ts || "")}`;
+}
+
+// ===================== MEDIA SESSION (LOCK SCREEN / BLUETOOTH) =====================
+function updateMediaSession(songOverride = null) {
+  if (!("mediaSession" in navigator)) return;
+  if (!state.settings.mediaSession) { navigator.mediaSession.metadata = null; return; }
+  const song = songOverride || getSongById(state.playingId);
+  if (!song) return;
+  const artwork = song.coverFile && !state.settings.lightweightMode
+    ? [{ src: new URL(song.coverFile, location.origin).href, sizes: "512x512", type: "image/jpeg" }]
+    : [];
+  navigator.mediaSession.metadata = new MediaMetadata({
+    title: song.title || "Bez názvu",
+    artist: song.artist || "Neznámý interpret",
+    album: song.album || "Song App Mobile",
+    artwork,
+  });
+  navigator.mediaSession.playbackState = audioEl.paused ? "paused" : "playing";
+  navigator.mediaSession.setActionHandler("play", () => audioEl.play().catch(() => {}));
+  navigator.mediaSession.setActionHandler("pause", () => audioEl.pause());
+  navigator.mediaSession.setActionHandler("previoustrack", () => playAdjacent(-1));
+  navigator.mediaSession.setActionHandler("nexttrack", () => playAdjacent(1));
+  navigator.mediaSession.setActionHandler("seekbackward", () => { audioEl.currentTime = Math.max(0, audioEl.currentTime - (Number(state.settings.skipSeconds) || 5)); });
+  navigator.mediaSession.setActionHandler("seekforward", () => { if (isFinite(audioEl.duration)) audioEl.currentTime = Math.min(audioEl.duration, audioEl.currentTime + (Number(state.settings.skipSeconds) || 5)); });
+}
+
+// ===================== ACTION SHEET (MOBILE CONTEXT MENU) =====================
+function openSongActionSheet(songId, fromPlaylist = false) {
+  const song = getSongById(songId);
+  if (!song) return;
+  const offline = isSongOffline(song);
+  $("actionSheetHeader").innerHTML = `
+    <div class="row-cover" style="width:44px;height:44px;">${renderCoverHtml(song, 20)}</div>
+    <div style="min-width:0;flex:1;">
+      <div class="card-title ellipsis">${escapeHtml(song.title || "Bez názvu")}</div>
+      <div class="card-artist ellipsis">${escapeHtml(song.artist || "Neznámý interpret")}</div>
+    </div>`;
+  $("actionSheetList").innerHTML = `
+    <button class="action-item" data-act="play">▶ Přehrát</button>
+    <button class="action-item" data-act="upnext">⏭ Přehrát jako další</button>
+    <button class="action-item" data-act="add-to-pl">➕ Přidat do playlistu</button>
+    ${fromPlaylist && state.activePlaylistId ? `<button class="action-item danger" data-act="remove-from-pl">✖ Odebrat z playlistu</button>` : ""}
+    <button class="action-item" data-act="find-lyrics">🔍 Najít lyrics</button>
+    <button class="action-item" data-act="edit">✏️ Upravit písničku</button>
+    <button class="action-item danger" data-act="delete">🗑 Smazat z databáze</button>
+  `;
+  $("actionSheet").dataset.songId = songId;
+  $("actionSheet").classList.add("open");
+}
+
+function closeActionSheet() {
+  $("actionSheet").classList.remove("open");
+}
+
+// ===================== CRUD: SONGS, IMPORT, DUPLICATES, PLAYLISTS =====================
+function normalizeDupText(str, stripNoise = false) {
+  let s = String(str || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+  if (stripNoise) {
+    s = s
+      .replace(/[\(\[][^\)\]]*(official|lyric|audio|video|hd|4k|visualizer|remaster|explicit|clean|feat\.?|ft\.?)[^\)\]]*[\)\]]/gi, " ")
+      .replace(/\s+(feat\.?|ft\.?)\s+.*$/i, " ");
+  }
+  return s.replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+function findDuplicateSongs(title, artist) {
+  const nt = normalizeDupText(title, true);
+  const na = normalizeDupText(artist, false);
+  if (!nt) return [];
+  const matches = [];
+  for (const s of state.songs) {
+    const st = normalizeDupText(s.title, true);
+    const sa = normalizeDupText(s.artist, false);
+    if (!st) continue;
+    const exactT = nt === st;
+    const simT = !exactT && nt.length >= 4 && st.length >= 4 && (nt.includes(st) || st.includes(nt));
+    const matchA = na && sa && (na === sa || na.includes(sa) || sa.includes(na));
+    if (exactT && matchA) matches.push({ song: s, reason: "Stejný název i interpret", score: 3 });
+    else if (exactT) matches.push({ song: s, reason: "Stejný název", score: 2 });
+    else if (simT && (matchA || (!na && !sa))) matches.push({ song: s, reason: "Podobný název", score: 1 });
+  }
+  return matches.sort((a, b) => b.score - a.score).slice(0, 6);
+}
+
+function confirmDuplicateModal(matches) {
+  return new Promise((resolve) => {
+    const modal = $("duplicateModal");
+    $("duplicateList").innerHTML = matches.map(({ song, reason }) => `
+      <div class="duplicate-item">
+        <div class="duplicate-cover">${renderCoverHtml(song, 18)}</div>
+        <div style="flex:1;min-width:0;">
+          <div class="card-title ellipsis">${escapeHtml(song.title)}</div>
+          <div class="card-artist ellipsis">${escapeHtml(song.artist || "Neznámý interpret")}</div>
+        </div>
+        <span class="duplicate-badge">${escapeHtml(reason)}</span>
+      </div>`).join("");
+    const done = (ok) => {
+      modal.classList.remove("open");
+      $("confirmDuplicateBtn").onclick = null;
+      $("cancelDuplicateBtn").onclick = null;
+      $("closeDuplicateBtn").onclick = null;
+      resolve(ok);
+    };
+    $("confirmDuplicateBtn").onclick = () => done(true);
+    $("cancelDuplicateBtn").onclick = () => done(false);
+    $("closeDuplicateBtn").onclick = () => done(false);
+    modal.classList.add("open");
+  });
+}
+
+function cleanupStaging() {
+  if (state.stagingToken && state.serverAvailable) {
+    fetch(`/api/staging/${state.stagingToken}`, { method: "DELETE" }).catch(() => {});
+  }
+  state.stagingToken = null;
+}
+
+function openAddModal() {
+  cleanupStaging();
+  state.editingId = null;
+  state.pendingAudioFile = null;
+  state.pendingCoverFile = null;
+  state.removeCoverFlag = false;
+  $("modalTitle").textContent = "Přidat písničku";
+  $("saveSongBtn").textContent = "Uložit písničku";
+  $("songForm").reset();
+  $("urlImportBox").style.display = "flex";
+  if ($("importOptsRow")) $("importOptsRow").style.display = IS_NATIVE_ANDROID ? "none" : "flex";
+  $("importConvertMp3").checked = Boolean(state.settings.importConvertMp3);
+  $("importConvertJpg").checked = Boolean(state.settings.importConvertJpg);
+  $("importStatus").style.display = "none";
+  $("audioFileLabel").textContent = "Vybrat audio soubor";
+  $("coverFileLabel").textContent = "Vybrat cover obrázek";
+  $("coverPreviewBox").innerHTML = "🎵";
+  $("clearCoverBtn").style.display = "none";
+  $("songModal").classList.add("open");
+}
+
+function openEditModal(id) {
+  cleanupStaging();
+  const song = getSongById(id);
+  if (!song) return;
+  state.editingId = id;
+  state.pendingAudioFile = null;
+  state.pendingCoverFile = null;
+  state.removeCoverFlag = false;
+  $("modalTitle").textContent = "Upravit písničku";
+  $("saveSongBtn").textContent = "Uložit změny";
+  $("urlImportBox").style.display = "none";
+  $("titleInput").value = song.title || "";
+  $("artistInput").value = song.artist || "";
+  $("albumInput").value = song.album || "";
+  $("lyricsInput").value = song.lyrics || "";
+  $("audioFileLabel").textContent = song.audioFile ? "Audio nahrané (klepni pro výměnu)" : "Vybrat audio soubor";
+  $("coverFileLabel").textContent = song.coverFile ? "Cover nahraný (klepni pro výměnu)" : "Vybrat cover obrázek";
+  $("coverPreviewBox").innerHTML = song.coverFile ? `<img src="${escapeHtml(song.coverFile)}?v=${encodeURIComponent(song._ts || "")}" alt="" />` : "🎵";
+  $("clearCoverBtn").style.display = song.coverFile ? "inline-flex" : "none";
+  $("songModal").classList.add("open");
+}
+
+function closeSongModal() {
+  cleanupStaging();
+  $("songModal").classList.remove("open");
+}
+
+async function importFromUrl() {
+  if (!state.serverAvailable) { showToast("Import z odkazu vyžaduje běžící server na PC.", true); return; }
+  const url = $("importUrlInput").value.trim();
+  if (!/^https?:\/\//i.test(url)) { showToast("Zadej platný odkaz (http/https).", true); return; }
+
+  cleanupStaging();
+  const btn = $("importUrlBtn"), st = $("importStatus");
+  btn.disabled = true; btn.textContent = "Načítám...";
+  st.style.display = "block"; st.style.color = "var(--text-secondary)";
+  st.textContent = "Stahuji audio, cover, metadata a lyrics...";
+  try {
+    const convertToMp3 = $("importConvertMp3").checked;
+    const convertCoverToJpg = $("importConvertJpg").checked;
+    state.settings.importConvertMp3 = convertToMp3;
+    state.settings.importConvertJpg = convertCoverToJpg;
+    saveSettings();
+
+    const res = await fetch("/api/import-url", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url, convertToMp3, convertCoverToJpg }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Import se nezdařil");
+    state.stagingToken = data.token || null;
+    if (data.hasAudio) $("audioFileLabel").textContent = `${data.audioName || "audio"} (z odkazu)`;
+    if (data.hasCover && data.coverPreviewUrl) {
+      $("coverPreviewBox").innerHTML = `<img src="${escapeHtml(data.coverPreviewUrl)}" alt="" />`;
+      $("coverFileLabel").textContent = "Cover načten z odkazu";
+      $("clearCoverBtn").style.display = "inline-flex";
+    }
+    if (data.title) $("titleInput").value = data.title;
+    if (data.artist) $("artistInput").value = data.artist;
+    if (data.album) $("albumInput").value = data.album;
+    if (data.lyrics) $("lyricsInput").value = data.lyrics;
+
+    const dups = findDuplicateSongs(data.title || "", data.artist || "");
+    if (dups.length) {
+      st.style.color = "#fde047";
+      st.textContent = `⚠️ Možný duplikát: „${dups[0].song.title}“ už v databázi je.`;
+    } else {
+      st.style.color = "#4ade80";
+      st.textContent = "✓ Načteno! Stačí klepnout na Uložit písničku.";
+    }
+  } catch (err) {
+    st.style.color = "#fca5a5";
+    st.textContent = `Chyba: ${err.message || "Nepodařilo se načíst."}`;
+  } finally {
+    btn.disabled = false; btn.textContent = "Načíst";
+  }
+}
+
+async function uploadBinary(url, file) {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": file.type || "application/octet-stream", "X-Filename": encodeURIComponent(file.name) },
+    body: file,
+  });
+  if (!res.ok) throw new Error("Chyba nahrávání souboru");
+  return res.json();
+}
+
+async function saveSong(e) {
+  e.preventDefault();
+  if (!state.serverAvailable) { showToast("Server na PC neběží – ukládání vyžaduje připojení.", true); return; }
+  const title = $("titleInput").value.trim();
+  const artist = $("artistInput").value.trim();
+  if (!title) { showToast("Zadej název písničky.", true); return; }
+
+  if (!state.editingId && state.settings.checkDuplicates !== false) {
+    const dups = findDuplicateSongs(title, artist);
+    if (dups.length) {
+      const ok = await confirmDuplicateModal(dups);
+      if (!ok) return;
+    }
+  }
+
+  const btn = $("saveSongBtn"), orig = btn.textContent;
+  btn.disabled = true; btn.textContent = "Ukládám...";
+  try {
+    const payload = {
+      title, artist, album: $("albumInput").value.trim(), lyrics: $("lyricsInput").value,
+      stagingToken: !state.editingId ? state.stagingToken : null,
+      useStagedAudio: !state.pendingAudioFile,
+      useStagedCover: !state.pendingCoverFile && !state.removeCoverFlag,
+    };
+    const res = await fetch(state.editingId ? `/api/songs/${state.editingId}` : "/api/songs", {
+      method: state.editingId ? "PUT" : "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) throw new Error("Nepodařilo se uložit písničku");
+    let saved = await res.json();
+
+    if (state.pendingAudioFile) saved = await uploadBinary(`/api/songs/${saved.id}/audio`, state.pendingAudioFile);
+    if (state.pendingCoverFile) saved = await uploadBinary(`/api/songs/${saved.id}/cover`, state.pendingCoverFile);
+    else if (state.removeCoverFlag && state.editingId) {
+      const delC = await fetch(`/api/songs/${saved.id}/cover`, { method: "DELETE" });
+      if (delC.ok) saved = await delC.json();
+    }
+
+    saved._ts = Date.now();
+    const idx = state.songs.findIndex((s) => s.id === saved.id);
+    if (idx >= 0) state.songs[idx] = saved;
+    else state.songs.unshift(saved);
+
+    state.stagingToken = null;
+    closeSongModal();
+    renderAllSongLists();
+    renderPlayer();
+    renderNowPlaying();
+    showToast(state.editingId ? "Písnička aktualizována" : "Písnička uložena!");
+  } catch (err) {
+    showToast(err.message || "Chyba při ukládání", true);
+  } finally {
+    btn.disabled = false; btn.textContent = orig;
+  }
+}
+
+function openDeleteModal(id) {
+  const song = getSongById(id);
+  if (!song) return;
+  state.deletingId = id;
+  if (!state.settings.confirmDelete) { confirmDelete(); return; }
+  $("deleteSongName").textContent = song.title;
+  $("deleteModal").classList.add("open");
+}
+
+async function confirmDelete() {
+  const id = state.deletingId;
+  if (!id) return;
+  try {
+    const res = await fetch(`/api/songs/${id}`, { method: "DELETE" });
+    if (!res.ok) throw new Error();
+    state.songs = state.songs.filter((s) => s.id !== id);
+    state.playlists.forEach((p) => { if (Array.isArray(p.songIds)) p.songIds = p.songIds.filter((x) => x !== id); });
+    if (state.playingId === id) { audioEl.pause(); audioEl.removeAttribute("src"); state.playingId = null; closeNowPlaying(); }
+    $("deleteModal").classList.remove("open");
+    renderAllSongLists();
+    renderPlayer();
+    showToast("Písnička smazána.");
+  } catch {
+    showToast("Smazání se nezdařilo.", true);
+  }
+}
+
+async function findLyricsForSong(songId) {
+  const song = getSongById(songId);
+  if (!song) return;
+  if (!state.serverAvailable) { showToast("Vyžaduje běžící server na PC.", true); return; }
+  showToast("Hledám lyrics...");
+  try {
+    const res = await fetch("/api/find-lyrics", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: song.title, artist: song.artist || "", album: song.album || "", duration: state.playingId === song.id && isFinite(audioEl.duration) ? Math.round(audioEl.duration) : 0 }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Lyrics nebyly nalezeny.");
+    const saveRes = await fetch(`/api/songs/${song.id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ lyrics: data.lyrics }),
+    });
+    if (!saveRes.ok) throw new Error("Nepodařilo se uložit lyrics.");
+    const updated = await saveRes.json();
+    updated._ts = Date.now();
+    const idx = state.songs.findIndex((s) => s.id === updated.id);
+    if (idx >= 0) state.songs[idx] = updated;
+    state.renderedLyricsKey = "";
+    renderAllSongLists();
+    renderLyricsView(updated, true);
+    if (state.fsLyricsOpen) renderFsLyrics(true);
+    showToast(data.synced ? `Nalezeny LRC lyrics (${data.source})!` : `Nalezeny lyrics (${data.source})!`);
+  } catch (err) {
+    showToast(err.message || "Lyrics nenalezeny", true);
+  }
+}
+
+// Playlists CRUD
+function openPlaylistModal(plId = null) {
+  state.editingPlaylistId = plId;
+  const pl = plId ? state.playlists.find((p) => p.id === plId) : null;
+  $("playlistModalTitle").textContent = pl ? "Přejmenovat playlist" : "Nový playlist";
+  $("playlistNameInput").value = pl ? pl.name : "";
+  $("playlistModal").classList.add("open");
+  setTimeout(() => $("playlistNameInput").focus(), 60);
+}
+
+async function savePlaylist(e) {
+  e.preventDefault();
+  const name = $("playlistNameInput").value.trim();
+  if (!name) return;
+  try {
+    const res = await fetch(state.editingPlaylistId ? `/api/playlists/${state.editingPlaylistId}` : "/api/playlists", {
+      method: state.editingPlaylistId ? "PUT" : "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    if (!res.ok) throw new Error();
+    const saved = await res.json();
+    const idx = state.playlists.findIndex((p) => p.id === saved.id);
+    if (idx >= 0) state.playlists[idx] = saved;
+    else state.playlists.unshift(saved);
+    $("playlistModal").classList.remove("open");
+    renderPlaylists();
+    showToast(state.editingPlaylistId ? "Playlist přejmenován" : "Playlist vytvořen");
+  } catch { showToast("Nepodařilo se uložit playlist.", true); }
+}
+
+async function deleteActivePlaylist() {
+  const pl = state.playlists.find((p) => p.id === state.activePlaylistId);
+  if (!pl || !confirm(`Smazat playlist „${pl.name}“? (Písničky zůstanou v knihovně.)`)) return;
+  try {
+    const res = await fetch(`/api/playlists/${pl.id}`, { method: "DELETE" });
+    if (!res.ok) throw new Error();
+    state.playlists = state.playlists.filter((p) => p.id !== pl.id);
+    closePlaylistDetail();
+    renderPlaylists();
+    showToast("Playlist smazán");
+  } catch { showToast("Nepodařilo se smazat playlist.", true); }
+}
+
+async function toggleSongInPlaylist(plId, songId, include) {
+  const pl = state.playlists.find((p) => p.id === plId);
+  if (!pl) return;
+  const set = new Set(pl.songIds || []);
+  if (include) set.add(songId); else set.delete(songId);
+  try {
+    const res = await fetch(`/api/playlists/${plId}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ songIds: [...set] }),
+    });
+    if (!res.ok) throw new Error();
+    const updated = await res.json();
+    const idx = state.playlists.findIndex((p) => p.id === updated.id);
+    if (idx >= 0) state.playlists[idx] = updated;
+    renderPlaylists();
+    renderAddToPlaylistChecklist();
+  } catch { showToast("Nepodařilo se upravit playlist.", true); }
+}
+
+async function moveSongInPlaylist(plId, songId, dir) {
+  const pl = state.playlists.find((p) => p.id === plId);
+  if (!pl || !Array.isArray(pl.songIds)) return;
+  const idx = pl.songIds.indexOf(songId);
+  const next = idx + (dir === "up" ? -1 : 1);
+  if (idx < 0 || next < 0 || next >= pl.songIds.length) return;
+  const ids = [...pl.songIds];
+  [ids[idx], ids[next]] = [ids[next], ids[idx]];
+  try {
+    const res = await fetch(`/api/playlists/${plId}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ songIds: ids }),
+    });
+    if (res.ok) {
+      const updated = await res.json();
+      const pi = state.playlists.findIndex((p) => p.id === updated.id);
+      if (pi >= 0) state.playlists[pi] = updated;
+      renderPlaylists();
+    }
+  } catch {}
+}
+
+function openAddToPlaylistModal(songId) {
+  const song = getSongById(songId);
+  if (!song) return;
+  state.addToPlaylistSongId = songId;
+  $("addToPlSongName").textContent = song.title;
+  $("quickNewPlaylistInput").value = "";
+  renderAddToPlaylistChecklist();
+  $("addToPlaylistModal").classList.add("open");
+}
+
+function renderAddToPlaylistChecklist() {
+  const sid = state.addToPlaylistSongId;
+  const el = $("playlistCheckList");
+  if (!state.playlists.length) {
+    el.innerHTML = `<div class="setting-desc">Zatím nemáš žádný playlist. Vytvoř první níže.</div>`;
+    return;
+  }
+  el.innerHTML = state.playlists.map((pl) => {
+    const has = Array.isArray(pl.songIds) && pl.songIds.includes(sid);
+    return `<label class="pl-check-item"><input type="checkbox" data-pl-toggle="${escapeHtml(pl.id)}" ${has ? "checked" : ""} /><span style="flex:1;font-weight:600;">${escapeHtml(pl.name)}</span><span class="setting-desc">${(pl.songIds || []).length}</span></label>`;
+  }).join("");
+}
+
+async function createQuickPlaylist() {
+  const name = $("quickNewPlaylistInput").value.trim();
+  if (!name) return;
+  try {
+    const res = await fetch("/api/playlists", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, songIds: state.addToPlaylistSongId ? [state.addToPlaylistSongId] : [] }),
+    });
+    if (!res.ok) throw new Error();
+    const created = await res.json();
+    state.playlists.unshift(created);
+    $("quickNewPlaylistInput").value = "";
+    renderPlaylists();
+    renderAddToPlaylistChecklist();
+    showToast(`Playlist „${name}“ vytvořen`);
+  } catch { showToast("Nepodařilo se vytvořit playlist.", true); }
+}
+
+// ===================== SETTINGS & LIGHTWEIGHT MODE =====================
+let saveSettingsTimer = null;
+function saveSettings() {
+  try { localStorage.setItem("songapp_mobile_settings", JSON.stringify(state.settings)); } catch {}
+  if (!state.serverAvailable) return;
+  clearTimeout(saveSettingsTimer);
+  saveSettingsTimer = setTimeout(() => {
+    fetch("/api/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(state.settings) }).catch(() => {});
+  }, 250);
+}
+
+function applyLyricsFontSize() {
+  const sz = state.settings.lyricsFontSize || "md";
+  document.body.classList.toggle("lyrics-sm", sz === "sm");
+  document.body.classList.toggle("lyrics-lg", sz === "lg");
+}
+
+function applyLightweightMode() {
+  const lw = Boolean(state.settings.lightweightMode);
+  document.body.classList.toggle("lightweight", lw);
+  $("reverbBar").disabled = lw;
+  $("fsReverbBar").disabled = lw;
+  $("setThemeMode").disabled = lw;
+  $("setVisualizerMode").disabled = lw;
+
+  if (lw) {
+    if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
+    clearVisualizers();
+    ["bgVisualizerCanvas", "npVisualizerCanvas", "fsVisualizerCanvas"].forEach(releaseCanvas);
+    resetDefaultAccent();
+    state.translationCache = {};
+    if (dryGain && wetGain && audioCtx) {
+      dryGain.gain.setTargetAtTime(1, audioCtx.currentTime, 0.02);
+      wetGain.gain.setTargetAtTime(0, audioCtx.currentTime, 0.02);
+    }
+  } else {
+    applyReverb();
+    applyDynamicColor(getSongById(state.playingId || state.selectedId));
+    if (!audioEl.paused) { ensureAudioGraph(); startAnimationLoop(); }
+  }
+  renderAllSongLists();
+  renderPlayer();
+  renderNowPlaying();
+  if (state.fsLyricsOpen) renderFsLyrics(true);
+  updateMediaSession();
+}
+
+function syncSettingsControls() {
+  const s = state.settings;
+  $("setLightweightMode").checked = Boolean(s.lightweightMode);
+  $("setThemeMode").value = s.themeMode || "color-dynamic-dark";
+  $("setVisualizerMode").value = s.visualizerMode || "background";
+  $("setLyricsFontSize").value = s.lyricsFontSize || "md";
+  $("setDefaultVolume").value = Number(s.defaultVolume ?? 40);
+  $("setDefaultVolLabel").textContent = `${Number(s.defaultVolume ?? 40)}%`;
+  $("setSkipSeconds").value = String(Number(s.skipSeconds || 5));
+  $("setMediaSession").checked = Boolean(s.mediaSession);
+  $("setRememberVolume").checked = Boolean(s.rememberVolume);
+  $("setRememberAudioFx").checked = Boolean(s.rememberAudioFx);
+  $("setRememberPlaybackModes").checked = Boolean(s.rememberPlaybackModes);
+  $("setRememberPlaybackState").checked = Boolean(s.rememberPlaybackState);
+  $("setAutoScrollLyrics").checked = Boolean(s.autoScrollLyrics);
+  $("setDefaultTranslationMode").value = s.defaultTranslationMode || "both";
+  $("setCheckDuplicates").checked = s.checkDuplicates !== false;
+  $("setConfirmDelete").checked = Boolean(s.confirmDelete);
+  $("setGithubRepo").value = s.githubRepo || "";
+  $("setGithubToken").value = s.githubToken || "";
+}
+
+function applyInitialSettings() {
+  const s = state.settings;
+  const vol = Math.max(0, Math.min(100, Number((s.rememberVolume ? s.lastVolume : s.defaultVolume) ?? 40))) / 100;
+  audioEl.volume = vol;
+  audioEl.muted = vol === 0;
+  syncVolumeUI(vol);
+
+  state.pitchSemitones = s.rememberAudioFx ? Number(s.lastPitch || 0) : 0;
+  state.reverbPercent = s.rememberAudioFx ? Number(s.lastReverb || 0) : 0;
+  applyPitchRate();
+  applyReverb();
+
+  state.shuffle = s.rememberPlaybackModes ? Boolean(s.lastShuffle) : false;
+  state.repeatMode = s.rememberPlaybackModes && ["off", "all", "one"].includes(s.lastRepeat) ? s.lastRepeat : "off";
+  $("sortSelect").value = s.sortBy || "newest";
+  applyLyricsFontSize();
+  syncSettingsControls();
+  applyLightweightMode();
+}
+
+let lastSavedPosTs = 0;
+function persistPlaybackPosition(force = false) {
+  if (!state.settings.rememberPlaybackState || !state.playingId) return;
+  const now = Date.now();
+  if (!force && now - lastSavedPosTs < 3500) return;
+  lastSavedPosTs = now;
+  state.settings.lastSongId = state.playingId;
+  state.settings.lastSongTime = Math.floor(audioEl.currentTime || 0);
+  try { localStorage.setItem("songapp_mobile_settings", JSON.stringify(state.settings)); } catch {}
+  if (force) saveSettings();
+}
+
+// ===================== LOAD INITIAL DATA =====================
+async function loadAppData() {
+  try {
+    const [songsRes, plRes, setRes] = await Promise.all([
+      fetch("/api/songs"),
+      fetch("/api/playlists").catch(() => null),
+      fetch("/api/settings").catch(() => null),
+    ]);
+    if (!songsRes.ok) throw new Error();
+    state.songs = await songsRes.json();
+    state.playlists = plRes && plRes.ok ? await plRes.json() : [];
+    state.serverAvailable = true;
+    $("offlineBanner").style.display = "none";
+    if (setRes && setRes.ok) {
+      const serverSet = await setRes.json();
+      if (serverSet && typeof serverSet === "object") {
+        state.settings = { ...DEFAULT_SETTINGS, ...serverSet, ...loadLocalSettings() };
+      }
+    }
+  } catch {
+    state.serverAvailable = false;
+    $("offlineBanner").style.display = "block";
+    if ("caches" in window) {
+      try {
+        const c = await caches.open(OFFLINE_CACHE);
+        const sR = await c.match("/api/songs");
+        const pR = await c.match("/api/playlists");
+        if (sR) state.songs = await sR.json();
+        if (pR) state.playlists = await pR.json();
+      } catch {}
+    }
+  }
+
+  await refreshOfflineCacheIndex();
+  applyInitialSettings();
+  renderAllSongLists();
+  loadNetworkInfo();
+
+  // Restore last song and time if enabled
+  if (state.settings.rememberPlaybackState && state.settings.lastSongId) {
+    const last = getSongById(state.settings.lastSongId);
+    if (last && last.audioFile) {
+      state.playingId = last.id;
+      state.selectedId = last.id;
+      audioEl.src = last.audioFile;
+      audioEl.addEventListener("loadedmetadata", () => {
+        const t = Number(state.settings.lastSongTime || 0);
+        if (t > 0 && isFinite(audioEl.duration) && t < audioEl.duration - 1) audioEl.currentTime = t;
+      }, { once: true });
+      applyDynamicColor(last);
+      renderPlayer();
+      renderNowPlaying();
+    }
+  }
+}
+
+// ===================== TOUCH SWIPE GESTURES =====================
+function attachHorizontalSwipe(el, onLeft, onRight) {
+  let sx = 0, sy = 0;
+  el.addEventListener("touchstart", (e) => { sx = e.touches[0].clientX; sy = e.touches[0].clientY; }, { passive: true });
+  el.addEventListener("touchend", (e) => {
+    const dx = e.changedTouches[0].clientX - sx;
+    const dy = e.changedTouches[0].clientY - sy;
+    if (Math.abs(dx) > 55 && Math.abs(dx) > Math.abs(dy) * 1.4) {
+      if (dx < 0) onLeft(); else onRight();
+    }
+  }, { passive: true });
+}
+
+attachHorizontalSwipe($("miniPlayer"), () => playAdjacent(1), () => playAdjacent(-1));
+attachHorizontalSwipe($("npCoverStage"), () => playAdjacent(1), () => playAdjacent(-1));
+
+let npSwipeY = 0;
+$("npGrabHandle").addEventListener("touchstart", (e) => { npSwipeY = e.touches[0].clientY; }, { passive: true });
+$("npGrabHandle").addEventListener("touchend", (e) => { if (e.changedTouches[0].clientY - npSwipeY > 55) closeNowPlaying(); }, { passive: true });
+
+// ===================== EVENT BINDINGS =====================
+$("bottomNav").addEventListener("click", (e) => {
+  const tab = e.target.closest(".nav-tab");
+  if (tab) switchTab(tab.dataset.tab);
+});
+
+on("lwPill", "click", () => switchTab("Settings"));
+on("viewToggleBtn", "click", () => {
+  state.viewMode = state.viewMode === "grid" ? "list" : "grid";
+  localStorage.setItem("songapp_mobile_view", state.viewMode);
+  renderLibrary();
+});
+on("addSongBtn", "click", openAddModal);
+on("sortSelect", "change", (e) => { state.settings.sortBy = e.target.value; saveSettings(); renderAllSongLists(); });
+on("shuffleAllBtn", "click", () => {
+  state.playQueuePlaylistId = null;
+  state.shuffle = true;
+  if (state.settings.rememberPlaybackModes) { state.settings.lastShuffle = true; saveSettings(); }
+  playAdjacent(1);
+  openNowPlaying("player");
+});
+
+function handleSongContainerClick(e, fromPlaylist = false) {
+  const moveBtn = e.target.closest("[data-move]");
+  if (moveBtn && state.activePlaylistId) {
+    e.stopPropagation();
+    moveSongInPlaylist(state.activePlaylistId, moveBtn.dataset.id, moveBtn.dataset.move);
+    return;
+  }
+  const moreBtn = e.target.closest("[data-more-id]");
+  if (moreBtn) { e.stopPropagation(); openSongActionSheet(moreBtn.dataset.moreId, fromPlaylist); return; }
+  const playBtn = e.target.closest("[data-play-id]");
+  if (playBtn) { e.stopPropagation(); togglePlaySong(playBtn.dataset.playId, fromPlaylist ? state.activePlaylistId : null); return; }
+  const row = e.target.closest("[data-song-id]");
+  if (row) {
+    togglePlaySong(row.dataset.songId, fromPlaylist ? state.activePlaylistId : null);
+    openNowPlaying("player");
+  }
+}
+
+on("librarySongs", "click", (e) => handleSongContainerClick(e, false));
+on("playlistSongsList", "click", (e) => handleSongContainerClick(e, true));
+on("searchResults", "click", (e) => handleSongContainerClick(e, false));
+
+// Playlists view
+on("newPlaylistBtn", "click", () => openPlaylistModal(null));
+on("backToPlaylistsBtn", "click", closePlaylistDetail);
+on("plRenameBtn", "click", () => openPlaylistModal(state.activePlaylistId));
+on("plDeleteBtn", "click", deleteActivePlaylist);
+on("playPlaylistBtn", "click", () => {
+  const songs = getPlaylistSongs(state.activePlaylistId).filter((s) => s.audioFile);
+  if (!songs.length) { showToast("Playlist nemá žádné audio.", true); return; }
+  state.playingId = null;
+  togglePlaySong(songs[0].id, state.activePlaylistId);
+  openNowPlaying("player");
+});
+on("shufflePlaylistBtn", "click", () => {
+  state.playQueuePlaylistId = state.activePlaylistId;
+  state.shuffle = true;
+  playAdjacent(1);
+  openNowPlaying("player");
+});
+on("playlistsList", "click", (e) => {
+  const playPl = e.target.closest("[data-play-pl]");
+  if (playPl) {
+    e.stopPropagation();
+    const songs = getPlaylistSongs(playPl.dataset.playPl).filter((s) => s.audioFile);
+    if (!songs.length) { showToast("Playlist je prázdný.", true); return; }
+    state.playingId = null;
+    togglePlaySong(songs[0].id, playPl.dataset.playPl);
+    return;
+  }
+  const card = e.target.closest("[data-open-pl]");
+  if (card) openPlaylistDetail(card.dataset.openPl);
+});
+
+// Search view
+on("searchInput", "input", (e) => { state.search = e.target.value; renderSearch(); });
+on("clearSearchBtn", "click", () => { state.search = ""; $("searchInput").value = ""; renderSearch(); });
+on("searchFilterChips", "click", (e) => {
+  const chip = e.target.closest("[data-filter]");
+  if (!chip) return;
+  state.searchFilter = chip.dataset.filter;
+  $("searchFilterChips").querySelectorAll(".chip").forEach((c) => c.classList.toggle("active", c === chip));
+  renderSearch();
+});
+
+// Mini-player & Now Playing Sheet
+on("miniPlayerTap", "click", (e) => { if (!e.target.closest(".mini-controls")) openNowPlaying(); });
+on("miniPlayBtn", "click", () => { if (state.playingId) { ensureAudioGraph(); audioEl.paused ? audioEl.play().catch(() => {}) : audioEl.pause(); } });
+on("miniNextBtn", "click", () => playAdjacent(1));
+["closeNpBtn", "npGrabHandle"].forEach((id) => on(id, "click", closeNowPlaying));
+on("npMoreBtn", "click", () => { const id = state.playingId || state.selectedId; if (id) openSongActionSheet(id, false); });
+on("npAddPlBtn", "click", () => { const id = state.playingId || state.selectedId; if (id) openAddToPlaylistModal(id); });
+on("npOfflineToggleBtn", "click", () => { const s = getSongById(state.playingId || state.selectedId); if (s) toggleOfflineSong(s); });
+on("npTabs", "click", (e) => { const b = e.target.closest("[data-np-tab]"); if (b) setNpTab(b.dataset.npTab); });
+on("npQuickFxBtn", "click", () => setNpTab("fx"));
+on("queuePill", "click", () => setNpTab("fx"));
+["openFsLyricsBtn", "npFsLyricsBtn2"].forEach((id) => on(id, "click", openFsLyrics));
+on("exitFsLyricsBtn", "click", closeFsLyrics);
+
+// Transport, FX, Seek, Volume
+["playPauseBtn", "fsPlayPauseBtn"].forEach((id) => on(id, "click", () => { if (state.playingId) { ensureAudioGraph(); audioEl.paused ? audioEl.play().catch(() => {}) : audioEl.pause(); } }));
+["prevBtn", "fsPrevBtn"].forEach((id) => on(id, "click", () => playAdjacent(-1)));
+["nextBtn", "fsNextBtn"].forEach((id) => on(id, "click", () => playAdjacent(1)));
+on("shuffleBtn", "click", () => {
+  state.shuffle = !state.shuffle;
+  if (state.settings.rememberPlaybackModes) { state.settings.lastShuffle = state.shuffle; saveSettings(); }
+  renderPlayer();
+  showToast(state.shuffle ? "Shuffle zapnut (min. 25 bez opakování)" : "Shuffle vypnut");
+});
+on("repeatBtn", "click", () => {
+  const order = ["off", "all", "one"];
+  state.repeatMode = order[(order.indexOf(state.repeatMode) + 1) % 3];
+  if (state.settings.rememberPlaybackModes) { state.settings.lastRepeat = state.repeatMode; saveSettings(); }
+  renderPlayer();
+  showToast({ off: "Opakování vypnuto", all: "Opakování seznamu", one: "Opakování 1 písničky" }[state.repeatMode]);
+});
+["abLoopBtn", "abLoopBtnFx"].forEach((id) => on(id, "click", handleAbLoopClick));
+["seekBar", "fsSeekBar"].forEach((id) => on(id, "input", (e) => { if (isFinite(audioEl.duration) && audioEl.duration > 0) audioEl.currentTime = (Number(e.target.value) / 100) * audioEl.duration; }));
+["pitchBar", "fsPitchBar"].forEach((id) => on(id, "input", (e) => setPitch(e.target.value)));
+["pitchResetBtn", "fsPitchResetBtn"].forEach((id) => on(id, "click", () => setPitch(0)));
+["reverbBar", "fsReverbBar"].forEach((id) => on(id, "input", (e) => setReverb(e.target.value)));
+["reverbResetBtn", "fsReverbResetBtn"].forEach((id) => on(id, "click", () => setReverb(0)));
+["volumeBar", "fsVolumeBar"].forEach((id) => on(id, "input", (e) => {
+  audioEl.volume = Number(e.target.value);
+  audioEl.muted = audioEl.volume === 0;
+  syncVolumeUI(audioEl.volume);
+  if (state.settings.rememberVolume) { state.settings.lastVolume = Math.round(audioEl.volume * 100); saveSettings(); }
+}));
+["muteBtn", "fsMuteBtn"].forEach((id) => on(id, "click", () => { audioEl.muted = !audioEl.muted; syncVolumeUI(audioEl.muted ? 0 : audioEl.volume); }));
+on("clearQueueBtn", "click", () => { state.upNextQueue = []; renderQueuePill(); renderUpNextList(); showToast("Fronta vyčištěna"); });
+on("upNextList", "click", (e) => {
+  const rm = e.target.closest("[data-remove-q]");
+  if (rm) { state.upNextQueue.splice(Number(rm.dataset.removeQ), 1); renderQueuePill(); renderUpNextList(); }
+});
+
+// Lyrics & Translate & Sync
+on("npFindLyricsBtn", "click", () => { const id = state.playingId || state.selectedId; if (id) findLyricsForSong(id); });
+[["syncLyricsBtn", startSyncMode], ["syncStampBtn", stampNextSyncLine], ["syncUndoBtn", undoSyncLine], ["syncSaveBtn", saveSyncMode], ["syncCancelBtn", cancelSyncMode], ["translateBtn", translateCurrentLyrics]].forEach(([id, fn]) => on(id, "click", fn));
+on("translateLangSelect", "change", () => {
+  const isCustom = $("translateLangSelect").value === "custom";
+  $("customLangInput").style.display = isCustom ? "inline-block" : "none";
+  if (isCustom) $("customLangInput").focus();
+  const song = getSongById(state.playingId || state.selectedId);
+  if (!song) return;
+  const lang = getSelectedTranslateLang();
+  const ck = lang ? getTranslationCacheKey(song, lang) : "";
+  state.activeTranslationLang = lang && state.translationCache[ck] ? lang : null;
+  renderLyricsView(song, true);
+  if (state.fsLyricsOpen) renderFsLyrics(true);
+});
+onEnter("customLangInput", translateCurrentLyrics);
+on("translateModes", "click", (e) => {
+  const b = e.target.closest("[data-tr-mode]");
+  if (!b) return;
+  state.translationMode = b.dataset.trMode;
+  const song = getSongById(state.playingId || state.selectedId);
+  if (song) renderLyricsView(song, true);
+  if (state.fsLyricsOpen) renderFsLyrics(true);
+});
+
+function seekToLyricIndex(idx) {
+  const song = getSongById(state.playingId || state.selectedId);
+  if (!song || !song.audioFile || !state.parsedLyrics) return;
+  const line = state.parsedLyrics.lines[idx];
+  let targetTime = null;
+  if (state.parsedLyrics.mode === "lrc" && line && line.time !== null) targetTime = line.time;
+  else if (isFinite(audioEl.duration) && audioEl.duration > 0) {
+    const auto = computeAutoTimes(state.parsedLyrics.lines, audioEl.duration);
+    if (auto && auto[idx] !== undefined) targetTime = auto[idx];
+  }
+  if (targetTime !== null) {
+    audioEl.currentTime = targetTime;
+    if (audioEl.paused) audioEl.play().catch(() => {});
+    updateActiveLyric(true);
+  }
+}
+
+on("detailLyrics", "click", (e) => {
+  const el = e.target.closest(".lyric-line");
+  if (!el) return;
+  const idx = Number(el.dataset.lyricIdx);
+  if (state.syncMode) { state.syncCursor = idx; stampNextSyncLine(); return; }
+  seekToLyricIndex(idx);
+});
+on("fsLyricsContent", "click", (e) => {
+  const el = e.target.closest(".fs-lyric-line[data-fs-idx]");
+  if (el) seekToLyricIndex(Number(el.dataset.fsIdx));
+});
+
+// Action Sheet & Modals
+on("actionSheet", "click", (e) => {
+  if (e.target === $("actionSheet")) { closeActionSheet(); return; }
+  const btn = e.target.closest("[data-act]");
+  if (!btn) return;
+  const id = $("actionSheet").dataset.songId;
+  const act = btn.dataset.act;
+  closeActionSheet();
+  if (act === "play") { togglePlaySong(id); openNowPlaying("player"); }
+  if (act === "upnext") enqueueUpNext(id);
+  if (act === "add-to-pl") openAddToPlaylistModal(id);
+  if (act === "remove-from-pl" && state.activePlaylistId) { toggleSongInPlaylist(state.activePlaylistId, id, false); showToast("Odebráno z playlistu"); }
+  if (act === "offline") toggleOfflineSong(getSongById(id));
+  if (act === "find-lyrics") findLyricsForSong(id);
+  if (act === "edit") openEditModal(id);
+  if (act === "delete") openDeleteModal(id);
+});
+
+["closeModalBtn", "cancelModalBtn"].forEach((id) => on(id, "click", closeSongModal));
+on("songForm", "submit", saveSong);
+on("importUrlBtn", "click", importFromUrl);
+onEnter("importUrlInput", importFromUrl);
+on("audioInput", "change", (e) => {
+  const f = e.target.files?.[0];
+  if (!f) return;
+  state.pendingAudioFile = f;
+  $("audioFileLabel").textContent = f.name;
+  if (!$("titleInput").value.trim()) $("titleInput").value = f.name.replace(/\.[^/.]+$/, "");
+});
+on("coverInput", "change", (e) => {
+  const f = e.target.files?.[0];
+  if (!f) return;
+  state.pendingCoverFile = f;
+  state.removeCoverFlag = false;
+  $("coverFileLabel").textContent = f.name;
+  $("coverPreviewBox").innerHTML = `<img src="${URL.createObjectURL(f)}" alt="" />`;
+  $("clearCoverBtn").style.display = "inline-flex";
+});
+on("clearCoverBtn", "click", () => {
+  state.pendingCoverFile = null;
+  state.removeCoverFlag = true;
+  $("coverInput").value = "";
+  $("coverFileLabel").textContent = "Cover bude odebrán";
+  $("coverPreviewBox").innerHTML = "🎵";
+  $("clearCoverBtn").style.display = "none";
+});
+on("lrcFileInput", "change", async (e) => {
+  const f = e.target.files?.[0];
+  if (!f) return;
+  $("lyricsInput").value = await f.text();
+  showToast(`Načteno: ${f.name}`);
+  e.target.value = "";
+});
+on("modalFindLyricsBtn", "click", async () => {
+  const title = $("titleInput").value.trim();
+  if (!title) { showToast("Nejprve zadej název písničky.", true); return; }
+  const btn = $("modalFindLyricsBtn");
+  btn.disabled = true; btn.textContent = "Hledám...";
+  try {
+    const res = await fetch("/api/find-lyrics", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title, artist: $("artistInput").value.trim(), album: $("albumInput").value.trim() }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Nenalezeno");
+    $("lyricsInput").value = data.lyrics;
+    showToast(`Načteny lyrics (${data.source})!`);
+  } catch (err) { showToast(err.message || "Nenalezeno", true); }
+  finally { btn.disabled = false; btn.textContent = "🔍 Najít"; }
+});
+
+["closeAddToPlBtn", "doneAddToPlBtn"].forEach((id) => on(id, "click", () => $("addToPlaylistModal").classList.remove("open")));
+on("playlistCheckList", "change", (e) => {
+  const cb = e.target.closest("[data-pl-toggle]");
+  if (cb && state.addToPlaylistSongId) toggleSongInPlaylist(cb.dataset.plToggle, state.addToPlaylistSongId, cb.checked);
+});
+on("quickNewPlaylistBtn", "click", createQuickPlaylist);
+onEnter("quickNewPlaylistInput", createQuickPlaylist);
+
+["closePlaylistModalBtn", "cancelPlaylistModalBtn"].forEach((id) => on(id, "click", () => $("playlistModal").classList.remove("open")));
+on("playlistForm", "submit", savePlaylist);
+
+["closeDeleteBtn", "cancelDeleteBtn"].forEach((id) => on(id, "click", () => $("deleteModal").classList.remove("open")));
+on("confirmDeleteBtn", "click", confirmDelete);
+
+["addToPlaylistModal", "playlistModal", "deleteModal"].forEach((id) => {
+  on(id, "click", (e) => { if (e.target === $(id)) $(id).classList.remove("open"); });
+});
+
+// Settings Tab Listeners
+on("lanUrlsBox", "click", (e) => {
+  const b = e.target.closest("[data-copy-url]");
+  if (!b) return;
+  navigator.clipboard?.writeText(b.dataset.copyUrl).then(() => showToast("Adresa zkopírována!")).catch(() => showToast(b.dataset.copyUrl));
+});
+on("cacheAllOfflineBtn", "click", cacheAllOffline);
+on("clearOfflineCacheBtn", "click", clearOfflineCache);
+
+function bindSetting(id, key, { event = "change", parse = (el) => (el.type === "checkbox" ? el.checked : el.value), onUpdate } = {}) {
+  on(id, event, (e) => {
+    const val = parse(e.target);
+    state.settings[key] = val;
+    if (onUpdate) onUpdate(val);
+    saveSettings();
+  });
+}
+
+bindSetting("setLightweightMode", "lightweightMode", { onUpdate: (v) => { applyLightweightMode(); showToast(v ? "Lightweight režim zapnut" : "Lightweight režim vypnut"); } });
+bindSetting("setThemeMode", "themeMode", { onUpdate: (v) => { state.settings.dynamicColor = v === "color-dynamic-dark"; applyDynamicColor(getSongById(state.playingId || state.selectedId)); } });
+bindSetting("setVisualizerMode", "visualizerMode", { onUpdate: clearVisualizers });
+bindSetting("setLyricsFontSize", "lyricsFontSize", { onUpdate: applyLyricsFontSize });
+bindSetting("setDefaultVolume", "defaultVolume", { event: "input", parse: (el) => Number(el.value), onUpdate: (v) => { $("setDefaultVolLabel").textContent = `${v}%`; } });
+bindSetting("setSkipSeconds", "skipSeconds", { parse: (el) => Number(el.value) || 5 });
+bindSetting("setMediaSession", "mediaSession", { onUpdate: () => updateMediaSession() });
+bindSetting("setRememberVolume", "rememberVolume", { onUpdate: () => { state.settings.lastVolume = Math.round(audioEl.volume * 100); } });
+bindSetting("setRememberAudioFx", "rememberAudioFx", { onUpdate: () => { state.settings.lastPitch = state.pitchSemitones; state.settings.lastReverb = state.reverbPercent; } });
+bindSetting("setRememberPlaybackModes", "rememberPlaybackModes", { onUpdate: () => { state.settings.lastShuffle = state.shuffle; state.settings.lastRepeat = state.repeatMode; } });
+bindSetting("setRememberPlaybackState", "rememberPlaybackState");
+bindSetting("setAutoScrollLyrics", "autoScrollLyrics");
+bindSetting("setDefaultTranslationMode", "defaultTranslationMode");
+bindSetting("setCheckDuplicates", "checkDuplicates");
+bindSetting("setConfirmDelete", "confirmDelete");
+bindSetting("setGithubRepo", "githubRepo", { event: "input", parse: (el) => el.value.trim() });
+bindSetting("setGithubToken", "githubToken", { event: "input", parse: (el) => el.value.trim() });
+on("checkUpdateBtn", "click", checkForUpdates);
+on("installUpdateBtn", "click", triggerApkInstall);
+
+// Audio Element Events
+audioEl.addEventListener("play", () => {
+  ensureAudioGraph();
+  applyPitchRate();
+  renderAllSongLists();
+  renderPlayer();
+  updateMediaSession();
+  notifyAndroidPlayback(true);
+  startAnimationLoop();
+});
+audioEl.addEventListener("pause", () => {
+  persistPlaybackPosition(true);
+  renderAllSongLists();
+  renderPlayer();
+  updateMediaSession();
+  notifyAndroidPlayback(false);
+});
+audioEl.addEventListener("ended", () => { if (!state.syncMode) playAdjacent(1, true); });
+audioEl.addEventListener("loadedmetadata", () => {
+  applyPitchRate();
+  const tot = formatTime(audioEl.duration);
+  $("totalTime").textContent = tot;
+  $("fsTotalTime").textContent = tot;
+  renderAbLoop();
+  updateActiveLyric(false);
+});
+audioEl.addEventListener("seeked", () => updateActiveLyric(true));
+
+let lastLwTick = 0;
+audioEl.addEventListener("timeupdate", () => {
+  enforceAbLoop();
+  persistPlaybackPosition(false);
+  if (document.hidden) return;
+  if (state.settings.lightweightMode) {
+    const now = performance.now();
+    if (now - lastLwTick < 900) return;
+    lastLwTick = now;
+  }
+  if (isFinite(audioEl.duration) && audioEl.duration > 0) {
+    const pct = (audioEl.currentTime / audioEl.duration) * 100;
+    const cur = formatTime(audioEl.currentTime);
+    const tot = formatTime(audioEl.duration);
+    $("seekBar").value = pct;
+    $("currentTime").textContent = cur;
+    $("miniProgressFill").style.width = `${pct}%`;
+    if (state.fsLyricsOpen) {
+      $("fsSeekBar").value = pct;
+      $("fsCurTime").textContent = cur;
+      $("fsTotalTime").textContent = tot;
+    }
+  }
+  updateActiveLyric(true);
+});
+
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    persistPlaybackPosition(true);
+    if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
+    clearVisualizers();
+  } else if (!audioEl.paused && !state.settings.lightweightMode) {
+    startAnimationLoop();
+  }
+});
+
+window.addEventListener("beforeunload", () => persistPlaybackPosition(true));
+
+loadAppData();

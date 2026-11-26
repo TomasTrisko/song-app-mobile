@@ -1,0 +1,743 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#09090e" id="themeColorMeta" />
+  <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+  <title>Song App</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <canvas id="bgVisualizerCanvas"></canvas>
+
+  <div class="app-shell" id="appShell">
+    <!-- TAB 1: LIBRARY -->
+    <section class="tab-view active" id="viewLibrary">
+      <header class="top-bar">
+        <div class="brand-wrap">
+          <div class="brand-icon">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M9 18V5l12-2v13"></path><circle cx="6" cy="18" r="3"></circle><circle cx="18" cy="16" r="3"></circle>
+            </svg>
+          </div>
+          <div>
+            <div class="top-title">Song App</div>
+            <div class="top-sub" id="libraryCountLabel">0 písniček</div>
+          </div>
+        </div>
+        <div class="top-actions">
+          <button type="button" class="lw-pill" id="lwPill" title="Lightweight režim je zapnutý">⚡ LW</button>
+          <button type="button" class="icon-pill" id="viewToggleBtn" title="Přepnout mřížku / seznam">
+            <svg id="viewToggleIcon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect>
+              <rect x="3" y="14" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect>
+            </svg>
+          </button>
+          <button type="button" class="btn btn-primary btn-sm" id="addSongBtn">+ Přidat</button>
+        </div>
+      </header>
+
+      <div class="sub-toolbar">
+        <select id="sortSelect" class="mobile-select" title="Řazení písniček">
+          <option value="newest">Nejnovější</option>
+          <option value="title">A–Z (název)</option>
+          <option value="artist">A–Z (interpret)</option>
+          <option value="lyrics">S lyrics první</option>
+        </select>
+        <button type="button" class="btn btn-secondary btn-sm" id="shuffleAllBtn">🔀 Zamíchat</button>
+      </div>
+
+      <div class="offline-banner" id="offlineBanner" style="display:none;">
+        Offline režim – přehrávají se uložené písničky v mobilu.
+      </div>
+
+      <div class="scroll-content" id="libraryScroll">
+        <div id="librarySongs"></div>
+      </div>
+    </section>
+
+    <!-- TAB 2: PLAYLISTS -->
+    <section class="tab-view" id="viewPlaylists">
+      <div id="playlistsHome">
+        <header class="top-bar">
+          <div>
+            <div class="top-title">Playlisty</div>
+            <div class="top-sub" id="playlistsCountLabel">0 playlistů</div>
+          </div>
+          <button type="button" class="btn btn-primary btn-sm" id="newPlaylistBtn">+ Nový</button>
+        </header>
+        <div class="scroll-content">
+          <div id="playlistsList" class="playlists-grid"></div>
+        </div>
+      </div>
+
+      <div id="playlistDetail" style="display:none; flex-direction:column; height:100%;">
+        <header class="top-bar">
+          <button type="button" class="icon-pill" id="backToPlaylistsBtn" title="Zpět na playlisty">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="15 18 9 12 15 6"></polyline>
+            </svg>
+          </button>
+          <div style="flex:1; min-width:0;">
+            <div class="top-title ellipsis" id="plDetailName">Playlist</div>
+            <div class="top-sub" id="plDetailCount">0 písniček</div>
+          </div>
+          <button type="button" class="icon-pill" id="plRenameBtn" title="Přejmenovat">✏️</button>
+          <button type="button" class="icon-pill" id="plDeleteBtn" title="Smazat">🗑</button>
+        </header>
+        <div class="sub-toolbar">
+          <button type="button" class="btn btn-primary btn-sm" id="playPlaylistBtn" style="flex:1;">▶ Přehrát playlist</button>
+          <button type="button" class="btn btn-secondary btn-sm" id="shufflePlaylistBtn" style="flex:1;">🔀 Zamíchat</button>
+        </div>
+        <div class="scroll-content">
+          <div id="playlistSongsList"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 3: SEARCH -->
+    <section class="tab-view" id="viewSearch">
+      <header class="top-bar">
+        <div class="search-field">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+            <circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+          </svg>
+          <input type="search" id="searchInput" placeholder="Hledat písničku, interpreta, lyrics..." autocomplete="off" />
+          <button type="button" id="clearSearchBtn" class="clear-search-btn" style="display:none;">✕</button>
+        </div>
+      </header>
+      <div class="chip-row" id="searchFilterChips">
+        <button type="button" class="chip active" data-filter="all">Vše</button>
+        <button type="button" class="chip" data-filter="lyrics">S lyrics</button>
+        <button type="button" class="chip" data-filter="audio">S audiem</button>
+      </div>
+      <div class="scroll-content">
+        <div id="searchResults"></div>
+      </div>
+    </section>
+
+    <!-- TAB 4: SETTINGS -->
+    <section class="tab-view" id="viewSettings">
+      <header class="top-bar">
+        <div>
+          <div class="top-title">Nastavení</div>
+          <div class="top-sub">Přizpůsobení aplikace a mobilního režimu</div>
+        </div>
+      </header>
+      <div class="scroll-content settings-scroll">
+        <div class="settings-card">
+          <div class="setting-section-title">📱 Aplikace &amp; Aktualizace</div>
+          <div class="setting-row-col">
+            <div class="setting-title">Song App <span id="appVersionBadge" class="tiny-badge synced">v1.0.1</span> • <span id="offlineCountLabel">0</span> skladeb offline</div>
+            <div class="setting-desc">Klepnutím zkontroluješ novou verzi na GitHubu a pokud existuje, automaticky se stáhne a spustí instalace (všechny písničky a playlisty zůstanou zachované).</div>
+          </div>
+          <div class="update-actions-row">
+            <button type="button" class="btn btn-primary btn-sm" id="checkUpdateBtn" style="flex:1;">🔄 Zkontrolovat aktualizace</button>
+            <button type="button" class="btn btn-secondary btn-sm" id="installUpdateBtn" style="display:none;">📲 Nainstalovat</button>
+          </div>
+          <div id="updateStatusBox" class="update-status-box" style="display:none;">
+            <div id="updateStatusText" class="update-status-text"></div>
+            <div id="updateProgressTrack" class="update-progress-track" style="display:none;">
+              <div id="updateProgressFill" class="update-progress-fill"></div>
+            </div>
+          </div>
+          <details class="update-config-details">
+            <summary>Nastavení GitHub zdroje aktualizací</summary>
+            <div class="update-config-body">
+              <label class="form-field">
+                <span>GitHub repozitář (uzivatel/nazev)</span>
+                <input type="text" id="setGithubRepo" placeholder="např. tomas/song-app-mobile" />
+              </label>
+              <label class="form-field">
+                <span>GitHub Token (jen pokud je repozitář privátní)</span>
+                <input type="password" id="setGithubToken" placeholder="ghp_... (nepovinné u veřejného)" />
+              </label>
+            </div>
+          </details>
+          <div id="lanUrlsBox" style="display:none;"></div>
+          <button type="button" id="cacheAllOfflineBtn" style="display:none;"></button>
+          <button type="button" id="clearOfflineCacheBtn" style="display:none;"></button>
+        </div>
+
+        <div class="settings-card">
+          <div class="setting-section-title">⚡ Výkon &amp; Vzhled</div>
+          <div class="setting-row featured">
+            <div class="setting-info">
+              <div class="setting-title">⚡ Lightweight režim</div>
+              <div class="setting-desc">Šetří baterii, RAM i GPU: skryje covery, vypne vizualizér, Reverb DSP, dynamické barvy, animace a blur.</div>
+            </div>
+            <label class="switch"><input type="checkbox" id="setLightweightMode" /><span class="switch-slider"></span></label>
+          </div>
+          <div class="setting-row" id="rowThemeMode">
+            <div class="setting-info">
+              <div class="setting-title">Barevný režim</div>
+              <div class="setting-desc">Dark nebo dynamické barvy podle coveru.</div>
+            </div>
+            <select id="setThemeMode" class="mobile-select">
+              <option value="color-dynamic-dark">Color-Dynamic</option>
+              <option value="dark">Dark</option>
+            </select>
+          </div>
+          <div class="setting-row" id="rowVisualizerMode">
+            <div class="setting-info">
+              <div class="setting-title">Audio vizualizér</div>
+              <div class="setting-desc">Kde má vizualizér reagovat na hudbu.</div>
+            </div>
+            <select id="setVisualizerMode" class="mobile-select">
+              <option value="background">Pozadí</option>
+              <option value="player">Přehrávač</option>
+              <option value="both">Obojí</option>
+              <option value="off">Vypnuto</option>
+            </select>
+          </div>
+          <div class="setting-row">
+            <div class="setting-info">
+              <div class="setting-title">Velikost písma lyrics</div>
+              <div class="setting-desc">Velikost textu v přehrávači i fullscreenu.</div>
+            </div>
+            <select id="setLyricsFontSize" class="mobile-select">
+              <option value="sm">Malé</option>
+              <option value="md">Střední</option>
+              <option value="lg">Velké</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="settings-card">
+          <div class="setting-section-title">🎧 Přehrávání &amp; Ovládání</div>
+          <div class="setting-row">
+            <div class="setting-info">
+              <div class="setting-title">Výchozí hlasitost (<span id="setDefaultVolLabel">40%</span>)</div>
+              <div class="setting-desc">Počáteční hlasitost po otevření aplikace.</div>
+            </div>
+            <input type="range" id="setDefaultVolume" min="0" max="100" step="5" value="40" style="width:105px;" />
+          </div>
+          <div class="setting-row">
+            <div class="setting-info">
+              <div class="setting-title">Posun vpřed / vzad</div>
+              <div class="setting-desc">Krok posunu v sekundách.</div>
+            </div>
+            <select id="setSkipSeconds" class="mobile-select">
+              <option value="5">5 s</option>
+              <option value="10">10 s</option>
+              <option value="15">15 s</option>
+            </select>
+          </div>
+          <div class="setting-row">
+            <div class="setting-info">
+              <div class="setting-title">Ovládání na zámku displeje</div>
+              <div class="setting-desc">Media Session pro sluchátka a zamykací obrazovku.</div>
+            </div>
+            <label class="switch"><input type="checkbox" id="setMediaSession" /><span class="switch-slider"></span></label>
+          </div>
+        </div>
+
+        <div class="settings-card">
+          <div class="setting-section-title">💾 Zapamatování mezi relacemi</div>
+          <div class="setting-row">
+            <div class="setting-info"><div class="setting-title">Poslední hlasitost</div></div>
+            <label class="switch"><input type="checkbox" id="setRememberVolume" /><span class="switch-slider"></span></label>
+          </div>
+          <div class="setting-row">
+            <div class="setting-info"><div class="setting-title">Pitch &amp; Reverb</div></div>
+            <label class="switch"><input type="checkbox" id="setRememberAudioFx" /><span class="switch-slider"></span></label>
+          </div>
+          <div class="setting-row">
+            <div class="setting-info"><div class="setting-title">Shuffle &amp; Repeat</div></div>
+            <label class="switch"><input type="checkbox" id="setRememberPlaybackModes" /><span class="switch-slider"></span></label>
+          </div>
+          <div class="setting-row">
+            <div class="setting-info"><div class="setting-title">Poslední písnička a čas</div></div>
+            <label class="switch"><input type="checkbox" id="setRememberPlaybackState" /><span class="switch-slider"></span></label>
+          </div>
+        </div>
+
+        <div class="settings-card">
+          <div class="setting-section-title">📝 Lyrics &amp; Knihovna</div>
+          <div class="setting-row">
+            <div class="setting-info"><div class="setting-title">Automatické posouvání lyrics</div></div>
+            <label class="switch"><input type="checkbox" id="setAutoScrollLyrics" /><span class="switch-slider"></span></label>
+          </div>
+          <div class="setting-row">
+            <div class="setting-info">
+              <div class="setting-title">Zobrazení po překladu</div>
+              <div class="setting-desc">Co ukázat jako první po kliknutí na Přeložit.</div>
+            </div>
+            <select id="setDefaultTranslationMode" class="mobile-select">
+              <option value="both">Obojí</option>
+              <option value="only">Překlad</option>
+              <option value="original">Originál</option>
+            </select>
+          </div>
+          <div class="setting-row">
+            <div class="setting-info"><div class="setting-title">Kontrola duplikátů při přidání</div></div>
+            <label class="switch"><input type="checkbox" id="setCheckDuplicates" /><span class="switch-slider"></span></label>
+          </div>
+          <div class="setting-row">
+            <div class="setting-info"><div class="setting-title">Potvrzení před smazáním</div></div>
+            <label class="switch"><input type="checkbox" id="setConfirmDelete" /><span class="switch-slider"></span></label>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- FLOATING MINI-PLAYER -->
+    <div class="mini-player" id="miniPlayer" style="display:none;">
+      <div class="mini-progress-track"><div class="mini-progress-fill" id="miniProgressFill"></div></div>
+      <div class="mini-player-inner" id="miniPlayerTap">
+        <div class="mini-cover" id="miniCover"></div>
+        <div class="mini-meta">
+          <div class="mini-title ellipsis" id="miniTitle">Nic nehraje</div>
+          <div class="mini-artist ellipsis" id="miniArtist"></div>
+        </div>
+        <div class="mini-controls">
+          <button type="button" class="mini-btn" id="miniPlayBtn" title="Přehrát / Pozastavit">
+            <svg id="miniPlayIcon" width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><polygon points="6 4 20 12 6 20 6 4"></polygon></svg>
+            <svg id="miniPauseIcon" width="22" height="22" viewBox="0 0 24 24" fill="currentColor" style="display:none;"><rect x="6" y="4" width="4" height="16"></rect><rect x="14" y="4" width="4" height="16"></rect></svg>
+          </button>
+          <button type="button" class="mini-btn" id="miniNextBtn" title="Další">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 4 15 12 5 20 5 4"></polygon><line x1="19" y1="5" x2="19" y2="19" stroke="currentColor" stroke-width="2.5"></line></svg>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- BOTTOM NAVIGATION BAR -->
+    <nav class="bottom-nav" id="bottomNav">
+      <button type="button" class="nav-tab active" data-tab="Library">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M9 18V5l12-2v13"></path><circle cx="6" cy="18" r="3"></circle><circle cx="18" cy="16" r="3"></circle>
+        </svg>
+        <span>Knihovna</span>
+      </button>
+      <button type="button" class="nav-tab" data-tab="Playlists">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line>
+          <line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line>
+        </svg>
+        <span>Playlisty</span>
+      </button>
+      <button type="button" class="nav-tab" data-tab="Search">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+        </svg>
+        <span>Hledat</span>
+      </button>
+      <button type="button" class="nav-tab" data-tab="Settings">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="3"></circle>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+        </svg>
+        <span>Nastavení</span>
+      </button>
+    </nav>
+  </div>
+
+  <!-- FULL-SCREEN NOW PLAYING SHEET -->
+  <div class="np-sheet" id="nowPlayingSheet">
+    <div class="np-bg-blur" id="npBgBlur"></div>
+    <canvas id="npVisualizerCanvas"></canvas>
+
+    <div class="np-shell">
+      <div class="np-grab-handle" id="npGrabHandle"><span></span></div>
+      <div class="np-header">
+        <button type="button" class="icon-pill" id="closeNpBtn" title="Zavřít přehrávač">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="6 9 12 15 18 9"></polyline>
+          </svg>
+        </button>
+        <div class="np-header-mid">
+          <div class="np-header-kicker">PŘEHRÁVÁ SE</div>
+          <div class="np-header-source ellipsis" id="npQueueLabel">Všechny písničky</div>
+        </div>
+        <button type="button" class="icon-pill" id="npMoreBtn" title="Možnosti písničky">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+            <circle cx="5" cy="12" r="2"></circle><circle cx="12" cy="12" r="2"></circle><circle cx="19" cy="12" r="2"></circle>
+          </svg>
+        </button>
+      </div>
+
+      <div class="np-tabs" id="npTabs">
+        <button type="button" class="active" data-np-tab="player">Přehrávač</button>
+        <button type="button" data-np-tab="lyrics">Lyrics</button>
+        <button type="button" data-np-tab="fx">FX &amp; Fronta</button>
+      </div>
+
+      <!-- NP TAB 1: PLAYER -->
+      <div class="np-panel active" id="npTabPlayer">
+        <div class="np-cover-stage" id="npCoverStage">
+          <div class="np-cover-box" id="npCoverBox"></div>
+        </div>
+
+        <div class="np-track-row">
+          <div class="np-track-meta">
+            <div class="np-title ellipsis" id="npTitle">Nic nehraje</div>
+            <div class="np-artist ellipsis" id="npArtist">Vyber písničku z knihovny</div>
+          </div>
+          <button type="button" class="icon-pill" id="npAddPlBtn" title="Přidat do playlistu">➕</button>
+          <button type="button" class="icon-pill" id="npOfflineToggleBtn" style="display:none;"></button>
+        </div>
+
+        <div class="np-seek-block">
+          <div class="seek-bar-wrap">
+            <input type="range" id="seekBar" min="0" max="100" value="0" step="0.1" />
+            <div class="ab-marker" id="abMarkerA" style="display:none;"></div>
+            <div class="ab-marker" id="abMarkerB" style="display:none;"></div>
+          </div>
+          <div class="seek-times">
+            <span id="currentTime">0:00</span>
+            <span id="abLoopBadge" class="ab-badge" style="display:none;"></span>
+            <span id="totalTime">0:00</span>
+          </div>
+        </div>
+
+        <div class="np-transport">
+          <button type="button" class="ctrl-btn" id="shuffleBtn" title="Shuffle (min. 25 bez opakování)">
+            <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="16 3 21 3 21 8"></polyline><line x1="4" y1="20" x2="21" y2="3"></line>
+              <polyline points="21 16 21 21 16 21"></polyline><line x1="15" y1="15" x2="21" y2="21"></line><line x1="4" y1="4" x2="9" y2="9"></line>
+            </svg>
+          </button>
+          <button type="button" class="ctrl-btn" id="prevBtn" title="Předchozí">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="currentColor">
+              <polygon points="19 20 9 12 19 4 19 20"></polygon><line x1="5" y1="19" x2="5" y2="5" stroke="currentColor" stroke-width="2.5"></line>
+            </svg>
+          </button>
+          <button type="button" class="ctrl-play" id="playPauseBtn" title="Přehrát / Pozastavit">
+            <svg id="playIcon" width="28" height="28" viewBox="0 0 24 24" fill="currentColor"><polygon points="6 4 20 12 6 20 6 4"></polygon></svg>
+            <svg id="pauseIcon" width="28" height="28" viewBox="0 0 24 24" fill="currentColor" style="display:none;"><rect x="6" y="4" width="4" height="16"></rect><rect x="14" y="4" width="4" height="16"></rect></svg>
+          </button>
+          <button type="button" class="ctrl-btn" id="nextBtn" title="Další">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="currentColor">
+              <polygon points="5 4 15 12 5 20 5 4"></polygon><line x1="19" y1="5" x2="19" y2="19" stroke="currentColor" stroke-width="2.5"></line>
+            </svg>
+          </button>
+          <button type="button" class="ctrl-btn" id="repeatBtn" title="Opakování">
+            <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="17 1 21 5 17 9"></polyline><path d="M3 11V9a4 4 0 0 1 4-4h14"></path>
+              <polyline points="7 23 3 19 7 15"></polyline><path d="M21 13v2a4 4 0 0 1-4 4H3"></path>
+            </svg>
+            <span class="repeat-one-dot" id="repeatOneDot" style="display:none;">1</span>
+          </button>
+        </div>
+
+        <div class="np-quick-pills">
+          <button type="button" class="quick-pill" id="npQuickFxBtn">🎚️ <span id="npQuickFxLabel">FX</span></button>
+          <button type="button" class="quick-pill" id="abLoopBtn">🔁 <span id="abLoopBtnText">A–B</span></button>
+          <button type="button" class="quick-pill" id="openFsLyricsBtn">⛶ Lyrics</button>
+          <button type="button" class="quick-pill" id="queuePill" style="display:none;">📋 <span id="queuePillCount">0</span></button>
+        </div>
+      </div>
+
+      <!-- NP TAB 2: LYRICS -->
+      <div class="np-panel" id="npTabLyrics">
+        <div class="lyrics-tools-bar">
+          <span class="sync-badge" id="syncBadge" style="display:none;">✓</span>
+          <button type="button" class="btn btn-secondary btn-xs" id="npFindLyricsBtn">🔍 Najít lyrics</button>
+          <button type="button" class="btn btn-secondary btn-xs" id="syncLyricsBtn">⏱️ Sync</button>
+          <button type="button" class="btn btn-secondary btn-xs" id="npFsLyricsBtn2">⛶ Fullscreen</button>
+        </div>
+
+        <div class="translate-bar" id="translateBar">
+          <div class="translate-row">
+            <select class="mobile-select" id="translateLangSelect" title="Cílový jazyk překladu">
+              <option value="cs">Čeština</option>
+              <option value="sk">Slovenština</option>
+              <option value="en">Angličtina</option>
+              <option value="custom">Jiný jazyk...</option>
+            </select>
+            <input type="text" class="mobile-select" id="customLangInput" placeholder="kód (de, es...)" style="display:none; max-width:105px;" maxlength="8" />
+            <button type="button" class="btn btn-secondary btn-xs" id="translateBtn">Přeložit</button>
+          </div>
+          <div class="translate-modes" id="translateModes">
+            <button type="button" data-tr-mode="both" class="active">Obojí</button>
+            <button type="button" data-tr-mode="only">Překlad</button>
+            <button type="button" data-tr-mode="original">Originál</button>
+          </div>
+        </div>
+
+        <div class="sync-toolbar" id="syncToolbar">
+          <div class="sync-hint">Klepni na <strong>Označit řádek</strong> pokaždé, když zpěvák začne zvýrazněný řádek.</div>
+          <div class="sync-actions">
+            <button type="button" class="btn btn-primary btn-sm" id="syncStampBtn" style="flex:2;">Označit řádek</button>
+            <button type="button" class="btn btn-secondary btn-sm" id="syncUndoBtn">Zpět</button>
+            <button type="button" class="btn btn-primary btn-sm" id="syncSaveBtn" style="background:#16a34a;">Uložit</button>
+            <button type="button" class="btn btn-secondary btn-sm" id="syncCancelBtn">Zrušit</button>
+          </div>
+        </div>
+
+        <div class="lyrics-scroll" id="detailLyrics"></div>
+      </div>
+
+      <!-- NP TAB 3: AUDIO FX & QUEUE -->
+      <div class="np-panel np-fx-panel" id="npTabFx">
+        <div class="fx-card">
+          <div class="fx-card-head">
+            <span>🎚️ Vinyl Pitch (Rychlost + Tónina)</span>
+            <div class="fx-head-right">
+              <span class="fx-val" id="pitchValue">+0 st</span>
+              <button type="button" class="btn btn-secondary btn-xs" id="pitchResetBtn">Reset</button>
+            </div>
+          </div>
+          <input type="range" id="pitchBar" min="-12" max="12" step="1" value="0" />
+        </div>
+
+        <div class="fx-card fx-reverb-card">
+          <div class="fx-card-head">
+            <span>🌊 Reverb (Ozvěna)</span>
+            <div class="fx-head-right">
+              <span class="fx-val" id="reverbValue">0%</span>
+              <button type="button" class="btn btn-secondary btn-xs" id="reverbResetBtn">Reset</button>
+            </div>
+          </div>
+          <input type="range" id="reverbBar" min="0" max="100" step="5" value="0" />
+        </div>
+
+        <div class="fx-card">
+          <div class="fx-card-head">
+            <span>🔊 Hlasitost</span>
+            <div class="fx-head-right">
+              <span class="fx-val" id="volumeLabel">40%</span>
+              <button type="button" class="btn btn-secondary btn-xs" id="muteBtn">Ztlumit</button>
+            </div>
+          </div>
+          <input type="range" id="volumeBar" min="0" max="1" step="0.02" value="0.4" />
+        </div>
+
+        <div class="fx-card">
+          <div class="fx-card-head">
+            <span>🔁 A–B Smyčka</span>
+            <button type="button" class="btn btn-secondary btn-xs" id="abLoopBtnFx">Nastavit A</button>
+          </div>
+          <div class="fx-sub" id="abLoopStatus">Vypnuto – nastav bod A a B pro opakování části skladby.</div>
+        </div>
+
+        <div class="fx-card">
+          <div class="fx-card-head">
+            <span>📋 Fronta (Přehrát jako další)</span>
+            <button type="button" class="btn btn-secondary btn-xs" id="clearQueueBtn">Vyčistit</button>
+          </div>
+          <div id="upNextList" class="upnext-list"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- FULLSCREEN DYNAMIC LYRICS OVERLAY -->
+  <div class="fs-lyrics-overlay" id="fsLyricsOverlay">
+    <div class="fs-bg-cover" id="fsBgCover"></div>
+    <canvas id="fsVisualizerCanvas"></canvas>
+
+    <div class="fs-topbar">
+      <div class="fs-song-info">
+        <div class="fs-cover-mini" id="fsCoverMini"></div>
+        <div style="min-width:0;">
+          <div class="fs-title ellipsis" id="fsTitle">Nic nehraje</div>
+          <div class="fs-artist ellipsis" id="fsArtist"></div>
+        </div>
+      </div>
+      <button type="button" class="fs-back-btn" id="exitFsLyricsBtn">← Zpět</button>
+    </div>
+
+    <div class="fs-lyrics-scroll" id="fsLyricsScroll">
+      <div class="fs-lyrics-inner" id="fsLyricsContent"></div>
+    </div>
+
+    <div class="fs-bottom-bar">
+      <div class="fs-seek-wrap">
+        <span class="time-label" id="fsCurTime">0:00</span>
+        <input type="range" id="fsSeekBar" min="0" max="100" value="0" step="0.1" />
+        <span class="time-label" id="fsTotalTime">0:00</span>
+      </div>
+      <div class="fs-controls-row">
+        <button type="button" class="ctrl-btn" id="fsPrevBtn">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><polygon points="19 20 9 12 19 4 19 20"></polygon><line x1="5" y1="19" x2="5" y2="5" stroke="currentColor" stroke-width="2.5"></line></svg>
+        </button>
+        <button type="button" class="ctrl-play ctrl-play-sm" id="fsPlayPauseBtn">
+          <svg id="fsPlayIcon" width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><polygon points="6 4 20 12 6 20 6 4"></polygon></svg>
+          <svg id="fsPauseIcon" width="20" height="20" viewBox="0 0 24 24" fill="currentColor" style="display:none;"><rect x="6" y="4" width="4" height="16"></rect><rect x="14" y="4" width="4" height="16"></rect></svg>
+        </button>
+        <button type="button" class="ctrl-btn" id="fsNextBtn">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 4 15 12 5 20 5 4"></polygon><line x1="19" y1="5" x2="19" y2="19" stroke="currentColor" stroke-width="2.5"></line></svg>
+        </button>
+        <button type="button" class="ctrl-btn" id="fsMuteBtn" title="Ztlumit">🔊</button>
+        <input type="range" id="fsVolumeBar" min="0" max="1" step="0.02" value="0.4" style="flex:1; max-width:110px;" />
+        <span id="fsVolumeVal" class="time-label">40%</span>
+      </div>
+      <div class="fs-fx-row">
+        <div class="fs-fx-item">
+          <span id="fsPitchResetBtn">Pitch <strong id="fsPitchVal">+0 st</strong></span>
+          <input type="range" id="fsPitchBar" min="-12" max="12" step="1" value="0" />
+        </div>
+        <div class="fs-fx-item fs-fx-reverb">
+          <span id="fsReverbResetBtn">Reverb <strong id="fsReverbVal">0%</strong></span>
+          <input type="range" id="fsReverbBar" min="0" max="100" step="5" value="0" />
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- BOTTOM SHEET: ADD / EDIT SONG -->
+  <div class="sheet-overlay" id="songModal">
+    <div class="sheet sheet-tall">
+      <div class="sheet-head">
+        <h2 id="modalTitle">Přidat písničku</h2>
+        <button type="button" class="icon-pill" id="closeModalBtn">✕</button>
+      </div>
+      <form id="songForm" class="sheet-body">
+        <div class="url-import-box" id="urlImportBox">
+          <div class="setting-title">Import z YouTube / YT Music odkazu</div>
+          <div class="import-row">
+            <input type="url" id="importUrlInput" placeholder="https://www.youtube.com/watch?v=..." />
+            <button type="button" class="btn btn-primary btn-sm" id="importUrlBtn">Načíst</button>
+          </div>
+          <div class="import-opts" id="importOptsRow">
+            <label><input type="checkbox" id="importConvertMp3" /> Převést na MP3</label>
+            <label><input type="checkbox" id="importConvertJpg" /> Cover na JPG</label>
+          </div>
+          <div id="importStatus" class="import-status" style="display:none;"></div>
+        </div>
+
+        <label class="form-field">
+          <span>Název písničky *</span>
+          <input type="text" id="titleInput" required placeholder="Např. After Dark" />
+        </label>
+        <div class="form-row-2">
+          <label class="form-field">
+            <span>Interpret</span>
+            <input type="text" id="artistInput" placeholder="Např. Mr.Kitty" />
+          </label>
+          <label class="form-field">
+            <span>Album</span>
+            <input type="text" id="albumInput" placeholder="Nepovinné" />
+          </label>
+        </div>
+
+        <div class="file-picker-row">
+          <label class="file-btn">
+            🎵 <span id="audioFileLabel">Vybrat audio soubor</span>
+            <input type="file" id="audioInput" accept="audio/*" hidden />
+          </label>
+        </div>
+
+        <div class="cover-picker-row">
+          <div class="cover-preview-box" id="coverPreviewBox">🎵</div>
+          <label class="file-btn" style="flex:1;">
+            🖼️ <span id="coverFileLabel">Vybrat cover obrázek</span>
+            <input type="file" id="coverInput" accept="image/*" hidden />
+          </label>
+          <button type="button" class="btn btn-secondary btn-xs" id="clearCoverBtn" style="display:none;">Odebrat</button>
+        </div>
+
+        <div class="form-field">
+          <div class="lyrics-field-head">
+            <span>Lyrics (obyčejný text nebo LRC)</span>
+            <div style="display:flex; gap:6px;">
+              <button type="button" class="btn btn-secondary btn-xs" id="modalFindLyricsBtn">🔍 Najít</button>
+              <label class="btn btn-secondary btn-xs" style="cursor:pointer;">
+                📂 .lrc
+                <input type="file" id="lrcFileInput" accept=".lrc,.txt" hidden />
+              </label>
+            </div>
+          </div>
+          <textarea id="lyricsInput" rows="6" placeholder="[00:12.40] První řádek textu..."></textarea>
+        </div>
+
+        <div class="sheet-footer">
+          <button type="button" class="btn btn-secondary" id="cancelModalBtn" style="flex:1;">Zrušit</button>
+          <button type="submit" class="btn btn-primary" id="saveSongBtn" style="flex:1.4;">Uložit písničku</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- BOTTOM SHEET: DUPLICATE CONFIRMATION -->
+  <div class="sheet-overlay" id="duplicateModal" style="z-index: 160;">
+    <div class="sheet">
+      <div class="sheet-head">
+        <h2>⚠️ Možný duplikát</h2>
+        <button type="button" class="icon-pill" id="closeDuplicateBtn">✕</button>
+      </div>
+      <div class="sheet-body">
+        <div class="setting-desc" style="font-size:0.86rem;">V databázi už existuje podobná písnička. Chceš ji přesto přidat?</div>
+        <div id="duplicateList" class="duplicate-list"></div>
+        <div class="sheet-footer">
+          <button type="button" class="btn btn-secondary" id="cancelDuplicateBtn" style="flex:1;">Zrušit</button>
+          <button type="button" class="btn btn-primary" id="confirmDuplicateBtn" style="flex:1;">Přidat i tak</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- BOTTOM SHEET: SONG ACTIONS (Mobile Context Menu) -->
+  <div class="sheet-overlay" id="actionSheet" style="z-index: 145;">
+    <div class="sheet">
+      <div class="action-sheet-header" id="actionSheetHeader"></div>
+      <div class="action-sheet-list" id="actionSheetList"></div>
+    </div>
+  </div>
+
+  <!-- BOTTOM SHEET: ADD TO PLAYLIST -->
+  <div class="sheet-overlay" id="addToPlaylistModal" style="z-index: 150;">
+    <div class="sheet">
+      <div class="sheet-head">
+        <h2>Přidat do playlistu</h2>
+        <button type="button" class="icon-pill" id="closeAddToPlBtn">✕</button>
+      </div>
+      <div class="sheet-body">
+        <div class="setting-desc">Písnička: <strong id="addToPlSongName" style="color:var(--text-primary);"></strong></div>
+        <div class="playlist-check-list" id="playlistCheckList"></div>
+        <div class="import-row">
+          <input type="text" id="quickNewPlaylistInput" placeholder="Nový playlist..." />
+          <button type="button" class="btn btn-secondary btn-sm" id="quickNewPlaylistBtn">+ Vytvořit</button>
+        </div>
+        <div class="sheet-footer">
+          <button type="button" class="btn btn-primary" id="doneAddToPlBtn" style="flex:1;">Hotovo</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- BOTTOM SHEET: CREATE / RENAME PLAYLIST -->
+  <div class="sheet-overlay" id="playlistModal" style="z-index: 150;">
+    <div class="sheet">
+      <div class="sheet-head">
+        <h2 id="playlistModalTitle">Nový playlist</h2>
+        <button type="button" class="icon-pill" id="closePlaylistModalBtn">✕</button>
+      </div>
+      <form id="playlistForm" class="sheet-body">
+        <label class="form-field">
+          <span>Název playlistu</span>
+          <input type="text" id="playlistNameInput" required placeholder="Např. Oblíbené, Noční jízda..." />
+        </label>
+        <div class="sheet-footer">
+          <button type="button" class="btn btn-secondary" id="cancelPlaylistModalBtn" style="flex:1;">Zrušit</button>
+          <button type="submit" class="btn btn-primary" style="flex:1;">Uložit</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- BOTTOM SHEET: DELETE CONFIRMATION -->
+  <div class="sheet-overlay" id="deleteModal" style="z-index: 155;">
+    <div class="sheet">
+      <div class="sheet-head">
+        <h2>Smazat písničku?</h2>
+        <button type="button" class="icon-pill" id="closeDeleteBtn">✕</button>
+      </div>
+      <div class="sheet-body">
+        <div class="setting-desc" style="font-size:0.88rem;">Opravdu smazat <strong id="deleteSongName" style="color:var(--text-primary);"></strong> včetně audia a coveru z disku?</div>
+        <div class="sheet-footer">
+          <button type="button" class="btn btn-secondary" id="cancelDeleteBtn" style="flex:1;">Zrušit</button>
+          <button type="button" class="btn btn-danger" id="confirmDeleteBtn" style="flex:1;">Smazat</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+  <audio id="audioPlayer" crossorigin="anonymous" preload="metadata"></audio>
+  <script src="/script.js"></script>
+</body>
+</html>
