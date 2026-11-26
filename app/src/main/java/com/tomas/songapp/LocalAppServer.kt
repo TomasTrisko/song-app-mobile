@@ -1,6 +1,8 @@
 package com.tomas.songapp
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDLRequest
 import org.json.JSONArray
@@ -24,6 +26,8 @@ class LocalAppServer(private val appContext: Context) {
     private val ytdlLock = Any()
     @Volatile
     private var ytdlInitialized = false
+    @Volatile
+    private var ffmpegReady = false
     @Volatile
     private var ytdlUpdatedThisSession = false
 
@@ -90,8 +94,61 @@ class LocalAppServer(private val appContext: Context) {
         synchronized(ytdlLock) {
             if (!ytdlInitialized) {
                 YoutubeDL.getInstance().init(appContext)
+                ffmpegReady = initFfmpegIfPresent()
                 ytdlInitialized = true
             }
+        }
+    }
+
+    private fun initFfmpegIfPresent(): Boolean {
+        val candidates = listOf(
+            "com.yausername.ffmpeg.FFmpeg",
+            "com.yausername.youtubedl_android.FFmpeg"
+        )
+        for (clsName in candidates) {
+            try {
+                val cls = Class.forName(clsName)
+                val inst = cls.getMethod("getInstance").invoke(null)
+                cls.getMethod("init", Context::class.java).invoke(inst, appContext)
+                return true
+            } catch (_: Exception) {
+            }
+        }
+        return false
+    }
+
+    private fun cropImageToSquareJpeg(srcFile: File, destFile: File, maxSize: Int = 640): Boolean {
+        return try {
+            val orig = BitmapFactory.decodeFile(srcFile.absolutePath) ?: return false
+            val side = minOf(orig.width, orig.height)
+            if (side <= 0) {
+                orig.recycle()
+                return false
+            }
+            val x = (orig.width - side) / 2
+            val y = (orig.height - side) / 2
+            val cropped = Bitmap.createBitmap(orig, x, y, side, side)
+            if (cropped !== orig) orig.recycle()
+            val finalBmp = if (side > maxSize) {
+                val scaled = Bitmap.createScaledBitmap(cropped, maxSize, maxSize, true)
+                if (scaled !== cropped) cropped.recycle()
+                scaled
+            } else cropped
+
+            val tmp = File(destFile.parentFile, destFile.name + ".tmp")
+            tmp.outputStream().use { out ->
+                finalBmp.compress(Bitmap.CompressFormat.JPEG, 92, out)
+            }
+            finalBmp.recycle()
+            if (srcFile.absolutePath != destFile.absolutePath) srcFile.delete()
+            if (destFile.exists()) destFile.delete()
+            if (!tmp.renameTo(destFile)) {
+                tmp.copyTo(destFile, overwrite = true)
+                tmp.delete()
+            }
+            true
+        } catch (_: Exception) {
+            false
         }
     }
 
@@ -384,8 +441,15 @@ class LocalAppServer(private val appContext: Context) {
                 val ext = safeExtension(origName, if (kind == "audio") ".mp3" else ".jpg")
                 val songDir = File(dataDir, id).apply { mkdirs() }
                 songDir.listFiles()?.filter { it.name.startsWith("$kind.") }?.forEach { it.delete() }
-                val destName = "$kind$ext"
-                File(songDir, destName).writeBytes(req.body)
+                var destName = "$kind$ext"
+                val destFile = File(songDir, destName)
+                destFile.writeBytes(req.body)
+                if (kind == "cover") {
+                    val squareFile = File(songDir, "cover.jpg")
+                    if (cropImageToSquareJpeg(destFile, squareFile)) {
+                        destName = "cover.jpg"
+                    }
+                }
                 var target: JSONObject? = null
                 synchronized(jsonLock) {
                     val arr = readJsonArray(songsJsonFile)
@@ -596,6 +660,11 @@ class LocalAppServer(private val appContext: Context) {
             addOption("--socket-timeout", "20")
             addOption("--print-json")
             addOption("-f", formatArg)
+            if (ffmpegReady) {
+                addOption("-x")
+                addOption("--audio-format", "mp3")
+                addOption("--audio-quality", "0")
+            }
             addOption("--write-thumbnail")
             if (!extractorArgs.isNullOrBlank()) {
                 addOption("--extractor-args", extractorArgs)
@@ -661,8 +730,10 @@ class LocalAppServer(private val appContext: Context) {
 
             var hasAudio = false
             var audioName: String? = null
-            files.filter { it.extension.lowercase() in audioExts && it.length() > 1024 }
-                .maxByOrNull { it.length() }?.let { af ->
+            val audioCandidates = files.filter { it.extension.lowercase() in audioExts && it.length() > 1024 }
+            val chosenAudio = audioCandidates.firstOrNull { it.extension.equals("mp3", ignoreCase = true) }
+                ?: audioCandidates.maxByOrNull { it.length() }
+            chosenAudio?.let { af ->
                 val destName = "audio.${af.extension.lowercase()}"
                 val dest = File(stageDir, destName)
                 if (af.absolutePath != dest.absolutePath) af.renameTo(dest)
@@ -673,11 +744,17 @@ class LocalAppServer(private val appContext: Context) {
             var hasCover = false
             var coverPreviewUrl: String? = null
             files.firstOrNull { it.extension.lowercase() in coverExts }?.let { cf ->
-                val destName = "cover.${cf.extension.lowercase()}"
-                val dest = File(stageDir, destName)
-                if (cf.absolutePath != dest.absolutePath) cf.renameTo(dest)
+                val squareDest = File(stageDir, "cover.jpg")
+                val finalName = if (cropImageToSquareJpeg(cf, squareDest)) {
+                    "cover.jpg"
+                } else {
+                    val fallbackName = "cover.${cf.extension.lowercase()}"
+                    val fbDest = File(stageDir, fallbackName)
+                    if (cf.absolutePath != fbDest.absolutePath) cf.renameTo(fbDest)
+                    fallbackName
+                }
                 hasCover = true
-                coverPreviewUrl = "/api/staging/$token/$destName"
+                coverPreviewUrl = "/api/staging/$token/$finalName"
             }
 
             if (!hasAudio) {
