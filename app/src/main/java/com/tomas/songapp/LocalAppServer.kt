@@ -574,11 +574,20 @@ class LocalAppServer(private val appContext: Context) {
     }
 
     // ===================== NATIVE ANDROID YOUTUBE / YT MUSIC IMPORTER =====================
+    private val audioExts = setOf("m4a", "mp3", "webm", "opus", "ogg", "wav", "flac", "aac", "mp4", "m4b", "3gp", "mkv")
+    private val coverExts = setOf("jpg", "jpeg", "png", "webp")
+
+    private fun normalizeYtUrl(rawUrl: String): String {
+        val m = Regex("(?:v=|youtu\\.be/)([a-zA-Z0-9_-]{11})").find(rawUrl)
+        return if (m != null) "https://www.youtube.com/watch?v=${m.groupValues[1]}" else rawUrl
+    }
+
     private fun runYtDlpAttempt(url: String, stageDir: File, formatArg: String, extractorArgs: String?): String {
         stageDir.listFiles()?.forEach { it.delete() }
         val outTemplate = File(stageDir, "media.%(ext)s").absolutePath
         val ytReq = YoutubeDLRequest(url).apply {
             addOption("--no-playlist")
+            addOption("--no-simulate")
             addOption("--no-warnings")
             addOption("--no-mtime")
             addOption("--no-part")
@@ -594,6 +603,13 @@ class LocalAppServer(private val appContext: Context) {
             addOption("-o", outTemplate)
         }
         val resp = YoutubeDL.getInstance().execute(ytReq)
+        val hasDownloadedAudio = stageDir.listFiles()?.any {
+            it.isFile && it.length() > 1024 && it.extension.lowercase() in audioExts
+        } == true
+        if (!hasDownloadedAudio) {
+            val foundNames = stageDir.listFiles()?.joinToString(", ") { "${it.name} (${it.length()}B)" } ?: "žádné"
+            throw IOException("Audio nebylo staženo (soubory: $foundNames)")
+        }
         return resp.out ?: ""
     }
 
@@ -603,22 +619,24 @@ class LocalAppServer(private val appContext: Context) {
         return try {
             ensureYoutubeDlInit()
             val isYoutube = url.contains("youtube.com", ignoreCase = true) || url.contains("youtu.be", ignoreCase = true)
+            val cleanUrl = if (isYoutube) normalizeYtUrl(url) else url
 
-            val attempts: List<Pair<String, String?>> = if (isYoutube) {
+            // Triple: (targetUrl, formatArg, extractorArgs)
+            val attempts: List<Triple<String, String, String?>> = if (isYoutube) {
                 listOf(
-                    "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best" to "youtube:player_client=android_vr,tv_embedded",
-                    "bestaudio[ext=m4a]/bestaudio/best" to "youtube:player_client=ios,android",
-                    "bestaudio/best" to null
+                    Triple(url, "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/18/best", "youtube:player_client=android_vr,tv_embedded"),
+                    Triple(cleanUrl, "bestaudio[ext=m4a]/bestaudio/18/best", "youtube:player_client=ios,android"),
+                    Triple(cleanUrl, "bestaudio/18/best", null)
                 )
             } else {
-                listOf("bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best" to null)
+                listOf(Triple(url, "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best", null))
             }
 
             var stdOut = ""
             var lastErr: Exception? = null
             for ((idx, attempt) in attempts.withIndex()) {
                 try {
-                    stdOut = runYtDlpAttempt(url, stageDir, attempt.first, attempt.second)
+                    stdOut = runYtDlpAttempt(attempt.first, stageDir, attempt.second, attempt.third)
                     lastErr = null
                     break
                 } catch (e: Exception) {
@@ -639,13 +657,12 @@ class LocalAppServer(private val appContext: Context) {
                 }
             }
 
-            val audioExts = setOf("m4a", "mp3", "webm", "opus", "ogg", "wav", "flac", "aac")
-            val coverExts = setOf("jpg", "jpeg", "png", "webp")
             val files = stageDir.listFiles()?.filter { it.isFile } ?: emptyList()
 
             var hasAudio = false
             var audioName: String? = null
-            files.firstOrNull { it.extension.lowercase() in audioExts }?.let { af ->
+            files.filter { it.extension.lowercase() in audioExts && it.length() > 1024 }
+                .maxByOrNull { it.length() }?.let { af ->
                 val destName = "audio.${af.extension.lowercase()}"
                 val dest = File(stageDir, destName)
                 if (af.absolutePath != dest.absolutePath) af.renameTo(dest)
@@ -663,9 +680,9 @@ class LocalAppServer(private val appContext: Context) {
                 coverPreviewUrl = "/api/staging/$token/$destName"
             }
 
-            if (!hasAudio && meta == null) {
+            if (!hasAudio) {
                 stageDir.deleteRecursively()
-                return JSONObject().put("error", "Nepodařilo se stáhnout audio z tohoto odkazu.")
+                return JSONObject().put("error", "Nepodařilo se stáhnout audio soubor z tohoto odkazu.")
             }
 
             var title = ""
@@ -1114,7 +1131,9 @@ class LocalAppServer(private val appContext: Context) {
             "json" -> "application/json; charset=utf-8"
             "svg" -> "image/svg+xml"
             "mp3" -> "audio/mpeg"
-            "m4a" -> "audio/mp4"
+            "m4a", "mp4", "m4b" -> "audio/mp4"
+            "3gp" -> "audio/3gpp"
+            "mkv" -> "video/x-matroska"
             "webm" -> "audio/webm"
             "ogg" -> "audio/ogg"
             "opus" -> "audio/opus"
