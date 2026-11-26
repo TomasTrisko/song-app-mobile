@@ -224,6 +224,17 @@ class MainActivity : AppCompatActivity() {
         fun isNative(): Boolean = true
 
         @JavascriptInterface
+        fun setSystemBarColor(r: Int, g: Int, b: Int) {
+            runOnUiThread {
+                try {
+                    val c = Color.rgb(r.coerceIn(0, 255), g.coerceIn(0, 255), b.coerceIn(0, 255))
+                    window.statusBarColor = c
+                    window.navigationBarColor = c
+                } catch (_: Exception) {}
+            }
+        }
+
+        @JavascriptInterface
         fun installDownloadedUpdate(): Boolean {
             var launched = false
             runOnUiThread {

@@ -1283,6 +1283,9 @@ function renderNowPlaying() {
   if ($("npCoverBox").dataset.coverKey !== coverKey) {
     $("npCoverBox").dataset.coverKey = coverKey;
     $("npCoverBox").innerHTML = renderCoverHtml(song, 54);
+    $("npCoverBox").classList.remove("cover-pop");
+    void $("npCoverBox").offsetWidth;
+    $("npCoverBox").classList.add("cover-pop");
   }
   renderLyricsView(song, false);
   renderUpNextList();
@@ -1453,50 +1456,140 @@ function startAnimationLoop() {
   rafId = requestAnimationFrame(tick);
 }
 
-// ===================== DYNAMIC COVER-ART THEME =====================
+// ===================== DYNAMIC COVER-ART THEME (MATCHES SONG-DATABASE) =====================
 function rgbToHsl(r, g, b) {
   r /= 255; g /= 255; b /= 255;
   const max = Math.max(r, g, b), min = Math.min(r, g, b);
-  let h = 0, s = 0, l = (max + min) / 2;
+  let h = 0, s = 0;
+  const l = (max + min) / 2;
   if (max !== min) {
     const d = max - min;
     s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
-    if (max === r) h = (g - b) / d + (g < b ? 6 : 0);
-    else if (max === g) h = (b - r) / d + 2;
-    else h = (r - g) / d + 4;
+    switch (max) {
+      case r: h = (g - b) / d + (g < b ? 6 : 0); break;
+      case g: h = (b - r) / d + 2; break;
+      case b: h = (r - g) / d + 4; break;
+    }
     h /= 6;
   }
-  return [h * 360, s, l];
+  return [h, s, l];
 }
 
 function hslToRgb(h, s, l) {
-  h = ((h % 360) + 360) % 360 / 360;
-  const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
-  const p = 2 * l - q;
-  const f = (t) => {
-    if (t < 0) t += 1; if (t > 1) t -= 1;
-    if (t < 1 / 6) return p + (q - p) * 6 * t;
-    if (t < 1 / 2) return q;
-    if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
-    return p;
-  };
-  return [Math.round(f(h + 1 / 3) * 255), Math.round(f(h) * 255), Math.round(f(h - 1 / 3) * 255)];
+  let r, g, b;
+  if (s === 0) {
+    r = g = b = l;
+  } else {
+    const hue2rgb = (p, q, t) => {
+      if (t < 0) t += 1;
+      if (t > 1) t -= 1;
+      if (t < 1 / 6) return p + (q - p) * 6 * t;
+      if (t < 1 / 2) return q;
+      if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+      return p;
+    };
+    const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+    const p = 2 * l - q;
+    r = hue2rgb(p, q, h + 1 / 3);
+    g = hue2rgb(p, q, h);
+    b = hue2rgb(p, q, h - 1 / 3);
+  }
+  return [Math.round(r * 255), Math.round(g * 255), Math.round(b * 255)];
+}
+
+function hueDistance(h1, h2) {
+  const d = Math.abs(h1 - h2);
+  return Math.min(d, 1 - d);
+}
+
+function syncSystemBarColor(r, g, b) {
+  const hex = `#${[r, g, b].map((v) => Math.max(0, Math.min(255, v)).toString(16).padStart(2, "0")).join("")}`;
+  const meta = $("themeColorMeta");
+  if (meta) meta.setAttribute("content", hex);
+  if (IS_NATIVE_ANDROID && typeof window.AndroidApp.setSystemBarColor === "function") {
+    try { window.AndroidApp.setSystemBarColor(r, g, b); } catch {}
+  }
 }
 
 function setAccentColors(c1, c2) {
-  const root = document.documentElement;
-  root.style.setProperty("--accent", `rgb(${c1[0]}, ${c1[1]}, ${c1[2]})`);
-  root.style.setProperty("--accent-2", `rgb(${c2[0]}, ${c2[1]}, ${c2[2]})`);
-  root.style.setProperty("--accent-rgb", `${c1[0]}, ${c1[1]}, ${c1[2]}`);
-  root.style.setProperty("--accent2-rgb", `${c2[0]}, ${c2[1]}, ${c2[2]}`);
+  const [h1, s1, l1] = rgbToHsl(c1[0], c1[1], c1[2]);
+  const cs1 = s1 < 0.12 ? s1 : Math.max(0.45, Math.min(0.88, s1));
+  const cl1 = Math.max(0.50, Math.min(0.66, l1));
+  const [ar, ag, ab] = hslToRgb(h1, cs1, cl1);
+  const [hr, hg, hb] = hslToRgb(h1, cs1, Math.min(0.76, cl1 + 0.1));
+  const [tr, tg, tb] = hslToRgb(h1, Math.min(0.9, cs1 + 0.05), 0.78);
+  const [lr, lg, lb] = hslToRgb(h1, Math.min(0.9, cs1 + 0.05), 0.87);
+
+  const second = c2 || c1;
+  const [h2, s2, l2] = rgbToHsl(second[0], second[1], second[2]);
+  const cs2 = s2 < 0.12 ? s2 : Math.max(0.45, Math.min(0.88, s2));
+  const cl2 = Math.max(0.50, Math.min(0.66, l2));
+  const [a2r, a2g, a2b] = hslToRgb(h2, cs2, cl2);
+  const [t2r, t2g, t2b] = hslToRgb(h2, Math.min(0.9, cs2 + 0.05), 0.78);
+
+  const root = document.documentElement.style;
+  root.setProperty("--accent", `rgb(${ar}, ${ag}, ${ab})`);
+  root.setProperty("--accent-hover", `rgb(${hr}, ${hg}, ${hb})`);
+  root.setProperty("--accent-soft", `rgba(${ar}, ${ag}, ${ab}, 0.17)`);
+  root.setProperty("--accent-glow", `rgba(${hr}, ${hg}, ${hb}, 0.85)`);
+  root.setProperty("--accent-text", `rgb(${tr}, ${tg}, ${tb})`);
+  root.setProperty("--accent-text-light", `rgb(${lr}, ${lg}, ${lb})`);
+  root.setProperty("--accent-rgb", `${ar}, ${ag}, ${ab}`);
+
+  root.setProperty("--accent-2", `rgb(${a2r}, ${a2g}, ${a2b})`);
+  root.setProperty("--accent2", `rgb(${a2r}, ${a2g}, ${a2b})`);
+  root.setProperty("--accent2-soft", `rgba(${a2r}, ${a2g}, ${a2b}, 0.17)`);
+  root.setProperty("--accent2-text", `rgb(${t2r}, ${t2g}, ${t2b})`);
+  root.setProperty("--accent2-rgb", `${a2r}, ${a2g}, ${a2b}`);
+
+  // Color-Dynamic-Dark tinted dark surfaces (identical to song-database)
+  const bgSat = s1 < 0.12 ? 0.06 : Math.min(0.32, Math.max(0.20, s1 * 0.42));
+  const [b0r, b0g, b0b] = hslToRgb(h1, bgSat, 0.055);
+  const [b1r, b1g, b1b] = hslToRgb(h1, bgSat * 0.92, 0.085);
+  const [b2r, b2g, b2b] = hslToRgb(h1, bgSat * 0.85, 0.12);
+  const [b3r, b3g, b3b] = hslToRgb(h1, bgSat * 0.82, 0.16);
+  const [bir, big, bib] = hslToRgb(h1, bgSat, 0.065);
+  const [pbr, pbg, pbb] = hslToRgb(h1, bgSat, 0.068);
+
+  root.setProperty("--bg-base", `rgb(${b0r}, ${b0g}, ${b0b})`);
+  root.setProperty("--bg-surface", `rgb(${b1r}, ${b1g}, ${b1b})`);
+  root.setProperty("--bg-elevated", `rgb(${b2r}, ${b2g}, ${b2b})`);
+  root.setProperty("--bg-hover", `rgb(${b3r}, ${b3g}, ${b3b})`);
+  root.setProperty("--bg-input", `rgb(${bir}, ${big}, ${bib})`);
+  root.setProperty("--surface-translucent", `rgba(${b1r}, ${b1g}, ${b1b}, 0.88)`);
+  root.setProperty("--player-bg", `rgb(${pbr}, ${pbg}, ${pbb})`);
+  syncSystemBarColor(b0r, b0g, b0b);
 }
 
 function resetDefaultAccent() {
-  setAccentColors([139, 92, 246], [236, 72, 153]);
+  const root = document.documentElement.style;
+  root.setProperty("--bg-base", "#0b0d12");
+  root.setProperty("--bg-surface", "#12151e");
+  root.setProperty("--bg-elevated", "#181c28");
+  root.setProperty("--bg-hover", "#202536");
+  root.setProperty("--bg-input", "#0e1118");
+  root.setProperty("--surface-translucent", "rgba(18, 21, 30, 0.88)");
+  root.setProperty("--player-bg", "#0e1017");
+
+  root.setProperty("--accent", "#8b5cf6");
+  root.setProperty("--accent-hover", "#9f75ff");
+  root.setProperty("--accent-soft", "rgba(139, 92, 246, 0.16)");
+  root.setProperty("--accent-glow", "rgba(167, 139, 250, 0.85)");
+  root.setProperty("--accent-text", "#c4b5fd");
+  root.setProperty("--accent-text-light", "#ddd6fe");
+  root.setProperty("--accent-rgb", "139, 92, 246");
+
+  root.setProperty("--accent-2", "#06b6d4");
+  root.setProperty("--accent2", "#06b6d4");
+  root.setProperty("--accent2-soft", "rgba(6, 182, 212, 0.16)");
+  root.setProperty("--accent2-text", "#67e8f9");
+  root.setProperty("--accent2-rgb", "6, 182, 212");
+  syncSystemBarColor(11, 13, 18);
 }
 
 function applyDynamicColor(song) {
-  if (state.settings.lightweightMode || state.settings.themeMode === "dark" || !song || !song.coverFile) {
+  const mode = state.settings.themeMode || (state.settings.dynamicColor === false ? "dark" : "color-dynamic-dark");
+  if (state.settings.lightweightMode || mode !== "color-dynamic-dark" || !song || !song.coverFile) {
     resetDefaultAccent();
     return;
   }
@@ -1505,30 +1598,64 @@ function applyDynamicColor(song) {
   img.onload = () => {
     try {
       const c = document.createElement("canvas");
-      c.width = 24; c.height = 24;
+      c.width = 32; c.height = 32;
       const ctx = c.getContext("2d");
-      ctx.drawImage(img, 0, 0, 24, 24);
-      const data = ctx.getImageData(0, 0, 24, 24).data;
-      const buckets = new Map();
+      ctx.drawImage(img, 0, 0, 32, 32);
+      const data = ctx.getImageData(0, 0, 32, 32).data;
+
+      const buckets = Array.from({ length: 18 }, () => ({ weight: 0, count: 0, r: 0, g: 0, b: 0 }));
+      const neutral = { count: 0, r: 0, g: 0, b: 0 };
+
       for (let i = 0; i < data.length; i += 4) {
-        const [h, s, l] = rgbToHsl(data[i], data[i + 1], data[i + 2]);
-        if (l < 0.14 || l > 0.88 || s < 0.18) continue;
-        const bin = Math.floor(h / 20);
-        const cur = buckets.get(bin) || { count: 0, h: 0, s: 0, l: 0 };
-        cur.count += s * 1.5; cur.h += h; cur.s += s; cur.l += l;
-        buckets.set(bin, cur);
+        const r = data[i], g = data[i + 1], b = data[i + 2], a = data[i + 3];
+        if (a < 180) continue;
+        const [h, s, l] = rgbToHsl(r, g, b);
+        if (l < 0.08 || l > 0.94) continue;
+        if (s < 0.12) {
+          neutral.count++; neutral.r += r; neutral.g += g; neutral.b += b;
+          continue;
+        }
+        const idx = Math.floor(h * 18) % 18;
+        const w = s * (1 - Math.abs(l - 0.52));
+        buckets[idx].weight += w; buckets[idx].count++;
+        buckets[idx].r += r * w; buckets[idx].g += g * w; buckets[idx].b += b * w;
       }
-      const sorted = [...buckets.values()].sort((a, b) => b.count - a.count);
-      if (!sorted.length) { resetDefaultAccent(); return; }
-      const p1 = sorted[0];
-      const h1 = p1.h / (p1.count / (p1.s / (p1.count || 1) * 1.5) || 1);
-      const rgb1 = hslToRgb(p1.h / Math.max(1, sorted[0].count / 1.1), Math.min(0.85, Math.max(0.55, p1.s / Math.max(1, p1.count))), 0.6);
-      const p2 = sorted.find((b) => Math.abs((b.h / Math.max(1, b.count)) - (p1.h / Math.max(1, p1.count))) > 35);
-      const rgb2 = p2
-        ? hslToRgb(p2.h / Math.max(1, p2.count / 1.1), 0.78, 0.58)
-        : hslToRgb((rgbToHsl(...rgb1)[0] + 42) % 360, 0.78, 0.58);
-      void h1;
-      setAccentColors(rgb1, rgb2);
+
+      const ranked = buckets
+        .map((bk) => ({ weight: bk.weight, count: bk.count, rgb: bk.weight > 0 ? [bk.r / bk.weight, bk.g / bk.weight, bk.b / bk.weight] : null }))
+        .filter((x) => x.count >= 2 && x.weight > 0.05)
+        .sort((a, b) => b.weight - a.weight);
+
+      if (!ranked.length) {
+        if (neutral.count > 0) {
+          const avg = [neutral.r / neutral.count, neutral.g / neutral.count, neutral.b / neutral.count];
+          setAccentColors(avg, avg);
+        } else resetDefaultAccent();
+        return;
+      }
+
+      const primary = ranked[0].rgb;
+      const [h1] = rgbToHsl(primary[0], primary[1], primary[2]);
+      let secondary = null;
+      for (const minDeg of [40, 20, 0]) {
+        let bestCand = null, bestScore = -1;
+        for (let i = 1; i < ranked.length; i++) {
+          const cand = ranked[i].rgb;
+          const [hc] = rgbToHsl(cand[0], cand[1], cand[2]);
+          const dist = hueDistance(h1, hc);
+          if (dist >= minDeg / 360) {
+            const score = ranked[i].weight * (0.4 + dist);
+            if (score > bestScore) { bestScore = score; bestCand = cand; }
+          }
+        }
+        if (bestCand) { secondary = bestCand; break; }
+      }
+      if (!secondary) {
+        secondary = neutral.count >= 10
+          ? [neutral.r / neutral.count, neutral.g / neutral.count, neutral.b / neutral.count]
+          : primary;
+      }
+      setAccentColors(primary, secondary);
     } catch { resetDefaultAccent(); }
   };
   img.onerror = resetDefaultAccent;
