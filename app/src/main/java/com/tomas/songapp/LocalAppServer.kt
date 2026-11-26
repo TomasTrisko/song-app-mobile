@@ -24,6 +24,8 @@ class LocalAppServer(private val appContext: Context) {
     private val ytdlLock = Any()
     @Volatile
     private var ytdlInitialized = false
+    @Volatile
+    private var ytdlUpdatedThisSession = false
 
     private var serverSocket: ServerSocket? = null
     private var executor: ExecutorService? = null
@@ -48,6 +50,12 @@ class LocalAppServer(private val appContext: Context) {
         running = true
         val pool = Executors.newCachedThreadPool()
         executor = pool
+        pool.execute {
+            try {
+                ensureYoutubeDlInit()
+                updateYoutubeDlOnce()
+            } catch (_: Exception) {}
+        }
         pool.execute {
             while (running) {
                 try {
@@ -83,6 +91,22 @@ class LocalAppServer(private val appContext: Context) {
             if (!ytdlInitialized) {
                 YoutubeDL.getInstance().init(appContext)
                 ytdlInitialized = true
+            }
+        }
+    }
+
+    private fun updateYoutubeDlOnce() {
+        if (ytdlUpdatedThisSession) return
+        synchronized(ytdlLock) {
+            if (!ytdlUpdatedThisSession) {
+                try {
+                    YoutubeDL.getInstance().updateYoutubeDL(appContext, YoutubeDL.UpdateChannel.NIGHTLY)
+                } catch (_: Exception) {
+                    try {
+                        YoutubeDL.getInstance().updateYoutubeDL(appContext, YoutubeDL.UpdateChannel.STABLE)
+                    } catch (_: Exception) {}
+                }
+                ytdlUpdatedThisSession = true
             }
         }
     }
@@ -550,25 +574,62 @@ class LocalAppServer(private val appContext: Context) {
     }
 
     // ===================== NATIVE ANDROID YOUTUBE / YT MUSIC IMPORTER =====================
+    private fun runYtDlpAttempt(url: String, stageDir: File, formatArg: String, extractorArgs: String?): String {
+        stageDir.listFiles()?.forEach { it.delete() }
+        val outTemplate = File(stageDir, "media.%(ext)s").absolutePath
+        val ytReq = YoutubeDLRequest(url).apply {
+            addOption("--no-playlist")
+            addOption("--no-warnings")
+            addOption("--no-mtime")
+            addOption("--no-part")
+            addOption("--no-cache-dir")
+            addOption("--force-ipv4")
+            addOption("--socket-timeout", "20")
+            addOption("--print-json")
+            addOption("-f", formatArg)
+            addOption("--write-thumbnail")
+            if (!extractorArgs.isNullOrBlank()) {
+                addOption("--extractor-args", extractorArgs)
+            }
+            addOption("-o", outTemplate)
+        }
+        val resp = YoutubeDL.getInstance().execute(ytReq)
+        return resp.out ?: ""
+    }
+
     private fun importFromYoutubeUrl(url: String): JSONObject {
         val token = "imp_${System.currentTimeMillis()}_${UUID.randomUUID().toString().replace("-", "").take(6)}"
         val stageDir = File(stagingRoot, token).apply { mkdirs() }
         return try {
             ensureYoutubeDlInit()
-            val outTemplate = File(stageDir, "media.%(ext)s").absolutePath
-            val ytReq = YoutubeDLRequest(url).apply {
-                addOption("--no-playlist")
-                addOption("--no-warnings")
-                addOption("--no-mtime")
-                addOption("--no-part")
-                addOption("--socket-timeout", "15")
-                addOption("--print-json")
-                addOption("-f", "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio")
-                addOption("--write-thumbnail")
-                addOption("-o", outTemplate)
+            val isYoutube = url.contains("youtube.com", ignoreCase = true) || url.contains("youtu.be", ignoreCase = true)
+
+            val attempts: List<Pair<String, String?>> = if (isYoutube) {
+                listOf(
+                    "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best" to "youtube:player_client=android_vr,tv_embedded",
+                    "bestaudio[ext=m4a]/bestaudio/best" to "youtube:player_client=ios,android",
+                    "bestaudio/best" to null
+                )
+            } else {
+                listOf("bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best" to null)
             }
-            val resp = YoutubeDL.getInstance().execute(ytReq)
-            val stdOut = resp.out ?: ""
+
+            var stdOut = ""
+            var lastErr: Exception? = null
+            for ((idx, attempt) in attempts.withIndex()) {
+                try {
+                    stdOut = runYtDlpAttempt(url, stageDir, attempt.first, attempt.second)
+                    lastErr = null
+                    break
+                } catch (e: Exception) {
+                    lastErr = e
+                    // If first attempt fails (e.g. 403 Forbidden), update yt-dlp to latest NIGHTLY before retrying
+                    if (idx == 0) {
+                        updateYoutubeDlOnce()
+                    }
+                }
+            }
+            if (lastErr != null) throw lastErr
 
             var meta: JSONObject? = null
             for (line in stdOut.split(Regex("\\r?\\n"))) {
