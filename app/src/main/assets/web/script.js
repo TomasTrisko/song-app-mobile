@@ -1690,12 +1690,15 @@ async function importFromUrl() {
     if (data.lyrics) $("lyricsInput").value = data.lyrics;
 
     const dups = findDuplicateSongs(data.title || "", data.artist || "");
-    if (dups.length) {
+    if (!data.hasAudio) {
+      st.style.color = "#fca5a5";
+      st.textContent = "⚠️ Pozor: Audio soubor se nepodařilo stáhnout. Zkus to znovu nebo vyber soubor z mobilu.";
+    } else if (dups.length) {
       st.style.color = "#fde047";
       st.textContent = `⚠️ Možný duplikát: „${dups[0].song.title}“ už v databázi je.`;
     } else {
       st.style.color = "#4ade80";
-      st.textContent = "✓ Načteno! Stačí klepnout na Uložit písničku.";
+      st.textContent = "✓ Audio, cover i metadata načteny! Klepni na Uložit písničku.";
     }
   } catch (err) {
     st.style.color = "#fca5a5";
