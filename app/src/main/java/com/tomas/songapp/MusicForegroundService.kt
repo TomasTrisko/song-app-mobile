@@ -175,7 +175,9 @@ class MusicForegroundService : Service() {
                     audioFocusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
                         .setAudioAttributes(attrs)
                         .setAcceptsDelayedFocusGain(true)
-                        .setWillPauseWhenDucked(false)
+                        // setWillPauseWhenDucked(true) disables Android's OS-level auto-ducking and sends
+                        // AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK to our listener, where we ignore it so music never dims!
+                        .setWillPauseWhenDucked(true)
                         .setOnAudioFocusChangeListener(focusChangeListener)
                         .build()
                 }
