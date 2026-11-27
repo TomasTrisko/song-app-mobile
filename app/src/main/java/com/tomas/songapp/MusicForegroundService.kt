@@ -5,14 +5,10 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
-import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.media.AudioAttributes
-import android.media.AudioFocusRequest
-import android.media.AudioManager
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
@@ -51,8 +47,6 @@ class MusicForegroundService : Service() {
 
     private var wakeLock: PowerManager.WakeLock? = null
     private lateinit var mediaSession: MediaSessionCompat
-    private var audioManager: AudioManager? = null
-    private var audioFocusRequest: AudioFocusRequest? = null
 
     private var lastTitle = "Song App"
     private var lastArtist = "Neznámý interpret"
@@ -62,20 +56,9 @@ class MusicForegroundService : Service() {
     private var cachedCoverBitmap: Bitmap? = null
     private var lastDurationMs = 0L
 
-    // Ignore AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK so incoming notifications NEVER lower music volume
-    private val focusChangeListener = AudioManager.OnAudioFocusChangeListener { focusChange ->
-        when (focusChange) {
-            AudioManager.AUDIOFOCUS_LOSS -> onMediaAction?.invoke("pause")
-            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
-                // Intentionally no ducking: keep music at full volume during system notifications
-            }
-        }
-    }
-
     override fun onCreate() {
         super.onCreate()
         createChannel()
-        audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager
         mediaSession = MediaSessionCompat(this, "SongAppMediaSession").apply {
             setCallback(object : MediaSessionCompat.Callback() {
                 override fun onPlay() { onMediaAction?.invoke("play") }
@@ -103,7 +86,6 @@ class MusicForegroundService : Service() {
                 return START_STICKY
             }
             ACTION_STOP -> {
-                abandonAudioFocus()
                 releaseWakeLock()
                 mediaSession.isActive = false
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
@@ -132,12 +114,10 @@ class MusicForegroundService : Service() {
         lastCoverPath = coverPath
         if (durationMs > 0L) lastDurationMs = durationMs
 
-        if (playing) {
-            acquireWakeLock()
-            requestAudioFocusNoDuck()
-        } else {
-            releaseWakeLock()
-        }
+        // NOTE: Do NOT call AudioManager.requestAudioFocus() here — Chromium WebView's <audio>
+        // element already manages AudioFocus, and requesting a second AudioFocusRequest in the
+        // same process immediately steals focus from WebView and pauses playback within <0.5s!
+        if (playing) acquireWakeLock() else releaseWakeLock()
 
         val coverBmp = loadCoverBitmap(coverPath)
         updateMediaSessionState(title, artist, album, coverBmp, playing, positionMs, lastDurationMs, speed)
@@ -152,7 +132,6 @@ class MusicForegroundService : Service() {
     }
 
     override fun onDestroy() {
-        abandonAudioFocus()
         releaseWakeLock()
         try {
             mediaSession.isActive = false
@@ -162,44 +141,6 @@ class MusicForegroundService : Service() {
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
-
-    private fun requestAudioFocusNoDuck() {
-        val am = audioManager ?: return
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                if (audioFocusRequest == null) {
-                    val attrs = AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_MEDIA)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                        .build()
-                    audioFocusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
-                        .setAudioAttributes(attrs)
-                        .setAcceptsDelayedFocusGain(true)
-                        // setWillPauseWhenDucked(true) disables Android's OS-level auto-ducking and sends
-                        // AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK to our listener, where we ignore it so music never dims!
-                        .setWillPauseWhenDucked(true)
-                        .setOnAudioFocusChangeListener(focusChangeListener)
-                        .build()
-                }
-                audioFocusRequest?.let { am.requestAudioFocus(it) }
-            } else {
-                @Suppress("DEPRECATION")
-                am.requestAudioFocus(focusChangeListener, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN)
-            }
-        } catch (_: Exception) {}
-    }
-
-    private fun abandonAudioFocus() {
-        val am = audioManager ?: return
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                audioFocusRequest?.let { am.abandonAudioFocusRequest(it) }
-            } else {
-                @Suppress("DEPRECATION")
-                am.abandonAudioFocus(focusChangeListener)
-            }
-        } catch (_: Exception) {}
-    }
 
     private fun loadCoverBitmap(coverUrlPath: String): Bitmap? {
         if (coverUrlPath.isBlank()) {
