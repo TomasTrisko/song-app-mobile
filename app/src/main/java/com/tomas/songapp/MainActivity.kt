@@ -52,12 +52,13 @@ class MainActivity : AppCompatActivity() {
     private var insetTopDp = 0
     private var insetBottomDp = 0
     private var webReady = false
+    private var isActivityVisible = false
 
     private val screenReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             when (intent?.action) {
                 Intent.ACTION_SCREEN_OFF -> notifyBackgroundState(true)
-                Intent.ACTION_SCREEN_ON -> if (!isFinishing) notifyBackgroundState(false)
+                Intent.ACTION_SCREEN_ON -> if (!isFinishing && isActivityVisible) notifyBackgroundState(false)
             }
         }
     }
@@ -236,11 +237,13 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStart() {
         super.onStart()
+        isActivityVisible = true
         notifyBackgroundState(false)
     }
 
     override fun onStop() {
         super.onStop()
+        isActivityVisible = false
         notifyBackgroundState(true)
     }
 
@@ -323,8 +326,10 @@ class MainActivity : AppCompatActivity() {
         fun setSystemBarColor(r: Int, g: Int, b: Int) {
             runOnUiThread {
                 try {
-                    val c = Color.rgb(r.coerceIn(0, 255), g.coerceIn(0, 255), b.coerceIn(0, 255))
-                    window.navigationBarColor = c
+                    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+                        val c = Color.rgb(r.coerceIn(0, 255), g.coerceIn(0, 255), b.coerceIn(0, 255))
+                        window.navigationBarColor = c
+                    }
                 } catch (_: Exception) {}
             }
         }
