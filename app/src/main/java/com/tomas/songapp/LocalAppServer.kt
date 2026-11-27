@@ -22,6 +22,7 @@ class LocalAppServer(private val appContext: Context) {
     private val songsJsonFile = File(dataDir, "songs.json")
     private val playlistsJsonFile = File(dataDir, "playlists.json")
     private val settingsJsonFile = File(dataDir, "settings.json")
+    private val prefs = appContext.getSharedPreferences("songapp_persistent_prefs", Context.MODE_PRIVATE)
     private val jsonLock = Any()
     private val ytdlLock = Any()
     @Volatile
@@ -42,13 +43,32 @@ class LocalAppServer(private val appContext: Context) {
     @Volatile private var updateTotalMb = 0.0
     @Volatile private var updateError = ""
 
+    @Volatile private var plImportState = "idle" // idle | running | done | error
+    @Volatile private var plImportName = ""
+    @Volatile private var plImportCurrent = 0
+    @Volatile private var plImportTotal = 0
+    @Volatile private var plImportCurrentTitle = ""
+    @Volatile private var plImportDownloaded = 0
+    @Volatile private var plImportSkipped = 0
+    @Volatile private var plImportFailed = 0
+    @Volatile private var plImportError = ""
+
     var port: Int = 0
         private set
 
     fun start(): Int {
         if (running && port > 0) return port
         initSeedMetadata()
-        val ss = ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))
+        // Bind to fixed deterministic port 18085..18099 first so WebView origin & localStorage persist across restarts/updates
+        val addr = InetAddress.getByName("127.0.0.1")
+        var ss: ServerSocket? = null
+        for (tryPort in 18085..18099) {
+            try {
+                ss = ServerSocket(tryPort, 50, addr)
+                break
+            } catch (_: Exception) {}
+        }
+        if (ss == null) ss = ServerSocket(0, 50, addr)
         serverSocket = ss
         port = ss.localPort
         running = true
@@ -548,15 +568,36 @@ class LocalAppServer(private val appContext: Context) {
             }
         }
 
-        // Settings
+        // Settings (dual-persisted in settings.json + Android SharedPreferences so updates/restarts never lose them)
         if (m == "GET" && p == "/api/settings") {
-            val raw = synchronized(jsonLock) { settingsJsonFile.readText(StandardCharsets.UTF_8).ifBlank { "{}" } }
+            val raw = synchronized(jsonLock) {
+                val fromFile = if (settingsJsonFile.exists()) settingsJsonFile.readText(StandardCharsets.UTF_8).trim() else ""
+                val fromPrefs = prefs.getString("settings_json", "")?.trim() ?: ""
+                when {
+                    fromFile.startsWith("{") && fromFile.length > 2 -> fromFile
+                    fromPrefs.startsWith("{") && fromPrefs.length > 2 -> {
+                        settingsJsonFile.writeText(fromPrefs, StandardCharsets.UTF_8)
+                        fromPrefs
+                    }
+                    else -> "{}"
+                }
+            }
             sendJson(out, 200, raw); return
         }
         if (m == "PUT" && p == "/api/settings") {
-            val text = String(req.body, StandardCharsets.UTF_8)
-            synchronized(jsonLock) { settingsJsonFile.writeText(text, StandardCharsets.UTF_8) }
-            sendJson(out, 200, text); return
+            val text = String(req.body, StandardCharsets.UTF_8).trim()
+            if (text.startsWith("{")) {
+                synchronized(jsonLock) {
+                    val tmp = File(dataDir, "settings.json.tmp")
+                    tmp.writeText(text, StandardCharsets.UTF_8)
+                    if (!tmp.renameTo(settingsJsonFile)) {
+                        settingsJsonFile.writeText(text, StandardCharsets.UTF_8)
+                        tmp.delete()
+                    }
+                    prefs.edit().putString("settings_json", text).apply()
+                }
+            }
+            sendJson(out, 200, text.ifBlank { "{}" }); return
         }
 
         // Find Lyrics (LRCLIB -> NetEase LRC -> Lyrist -> lyrics.ovh)
@@ -617,6 +658,28 @@ class LocalAppServer(private val appContext: Context) {
             val result = importFromYoutubeUrl(url)
             if (result.has("error")) sendJson(out, 500, result.toString())
             else sendJson(out, 200, result.toString())
+            return
+        }
+
+        // POST /api/import-playlist & GET /api/playlist-import-status (Download whole YouTube / YT Music playlists!)
+        if (m == "POST" && p == "/api/import-playlist") {
+            val body = JSONObject(String(req.body, StandardCharsets.UTF_8))
+            val url = body.optString("url", "").trim()
+            val customName = body.optString("playlistName", "").trim()
+            if (!Regex("^https?://", RegexOption.IGNORE_CASE).containsMatchIn(url)) {
+                sendError(out, 400, "Zadej platný odkaz na playlist (http:// nebo https://)")
+                return
+            }
+            if (plImportState == "running") {
+                sendJson(out, 200, buildPlaylistImportStatusJson().toString())
+                return
+            }
+            startPlaylistImport(url, customName)
+            sendJson(out, 200, buildPlaylistImportStatusJson().toString())
+            return
+        }
+        if (m == "GET" && p == "/api/playlist-import-status") {
+            sendJson(out, 200, buildPlaylistImportStatusJson().toString())
             return
         }
 
@@ -816,6 +879,178 @@ class LocalAppServer(private val appContext: Context) {
         } catch (e: Exception) {
             stageDir.deleteRecursively()
             JSONObject().put("error", "Import se nezdařil: ${e.message ?: "neznámá chyba"}")
+        }
+    }
+
+    // ===================== WHOLE YOUTUBE / YT MUSIC PLAYLIST DOWNLOADER =====================
+    private fun buildPlaylistImportStatusJson(): JSONObject = JSONObject()
+        .put("state", plImportState)
+        .put("playlistName", plImportName)
+        .put("current", plImportCurrent)
+        .put("total", plImportTotal)
+        .put("currentTitle", plImportCurrentTitle)
+        .put("downloaded", plImportDownloaded)
+        .put("skipped", plImportSkipped)
+        .put("failed", plImportFailed)
+        .put("error", plImportError)
+
+    private fun startPlaylistImport(url: String, customName: String) {
+        plImportState = "running"
+        plImportName = customName.ifBlank { "Načítám playlist..." }
+        plImportCurrent = 0
+        plImportTotal = 0
+        plImportCurrentTitle = "Načítám seznam skladeb..."
+        plImportDownloaded = 0
+        plImportSkipped = 0
+        plImportFailed = 0
+        plImportError = ""
+
+        val pool = executor ?: return
+        pool.execute {
+            try {
+                ensureYoutubeDlInit()
+                val listReq = YoutubeDLRequest(url).apply {
+                    addOption("--flat-playlist")
+                    addOption("--dump-single-json")
+                    addOption("--no-warnings")
+                    addOption("--socket-timeout", "20")
+                }
+                val listOut = YoutubeDL.getInstance().execute(listReq).out ?: ""
+                val jsonLine = listOut.split(Regex("\\r?\\n")).map { it.trim() }
+                    .firstOrNull { it.startsWith("{") && it.endsWith("}") }
+                    ?: throw IOException("Nepodařilo se načíst seznam skladeb z playlistu.")
+                val plMeta = JSONObject(jsonLine)
+                val entries = plMeta.optJSONArray("entries")
+                    ?: throw IOException("Odkaz neobsahuje žádný playlist skladeb.")
+                if (entries.length() == 0) throw IOException("Playlist je prázdný.")
+
+                val finalPlName = customName.ifBlank {
+                    plMeta.optString("title", "").trim().ifEmpty { "Stažený playlist" }
+                }
+                plImportName = finalPlName
+                plImportTotal = entries.length()
+
+                // Create playlist immediately so songs appear inside it as they download
+                val plId = "pl_${System.currentTimeMillis()}_${UUID.randomUUID().toString().replace("-", "").take(6)}"
+                synchronized(jsonLock) {
+                    val pls = readJsonArray(playlistsJsonFile)
+                    val newPl = JSONObject()
+                        .put("id", plId)
+                        .put("name", finalPlName)
+                        .put("songIds", JSONArray())
+                        .put("createdAt", System.currentTimeMillis())
+                    val updatedPls = JSONArray()
+                    updatedPls.put(newPl)
+                    for (i in 0 until pls.length()) updatedPls.put(pls.get(i))
+                    playlistsJsonFile.writeText(updatedPls.toString(), StandardCharsets.UTF_8)
+                }
+
+                for (i in 0 until entries.length()) {
+                    plImportCurrent = i + 1
+                    val entry = entries.optJSONObject(i) ?: continue
+                    val entryTitle = entry.optString("title", "Skladba ${i + 1}").trim()
+                    val entryId = entry.optString("id", "").trim()
+                    val entryUrl = entry.optString("url", "").trim().let { raw ->
+                        when {
+                            raw.startsWith("http") -> raw
+                            entryId.isNotEmpty() -> "https://www.youtube.com/watch?v=$entryId"
+                            else -> ""
+                        }
+                    }
+                    if (entryUrl.isEmpty() || entryTitle == "[Deleted video]" || entryTitle == "[Private video]") {
+                        plImportSkipped++
+                        continue
+                    }
+                    plImportCurrentTitle = entryTitle
+
+                    // Check if song with same title already exists -> just add to playlist instead of re-downloading
+                    var existingId: String? = null
+                    synchronized(jsonLock) {
+                        val songs = readJsonArray(songsJsonFile)
+                        val normEntry = entryTitle.lowercase().replace(Regex("[^a-z0-9]+"), "")
+                        for (k in 0 until songs.length()) {
+                            val s = songs.getJSONObject(k)
+                            val normS = s.optString("title", "").lowercase().replace(Regex("[^a-z0-9]+"), "")
+                            if (normEntry.length >= 4 && normEntry == normS && !s.isNull("audioFile")) {
+                                existingId = s.optString("id")
+                                break
+                            }
+                        }
+                    }
+                    if (existingId != null) {
+                        addSongIdToPlaylist(plId, existingId!!)
+                        plImportSkipped++
+                        continue
+                    }
+
+                    val imported = importFromYoutubeUrl(entryUrl)
+                    if (imported.has("error") || !imported.optBoolean("hasAudio", false)) {
+                        plImportFailed++
+                        continue
+                    }
+                    val token = imported.optString("token", "")
+                    val songId = "song_${System.currentTimeMillis()}_${UUID.randomUUID().toString().replace("-", "").take(6)}"
+                    val songDir = File(dataDir, songId).apply { mkdirs() }
+                    val stageDir = File(stagingRoot, token)
+                    var audioUrl: Any = JSONObject.NULL
+                    var coverUrl: Any = JSONObject.NULL
+                    if (stageDir.exists()) {
+                        stageDir.listFiles()?.firstOrNull { it.name.startsWith("audio.") }?.let { af ->
+                            af.copyTo(File(songDir, af.name), overwrite = true)
+                            audioUrl = "/data/$songId/${af.name}"
+                        }
+                        stageDir.listFiles()?.firstOrNull { it.name.startsWith("cover.") }?.let { cf ->
+                            cf.copyTo(File(songDir, cf.name), overwrite = true)
+                            coverUrl = "/data/$songId/${cf.name}"
+                        }
+                        stageDir.deleteRecursively()
+                    }
+                    val newSong = JSONObject()
+                        .put("id", songId)
+                        .put("title", imported.optString("title", entryTitle).ifBlank { entryTitle })
+                        .put("artist", imported.optString("artist", ""))
+                        .put("album", imported.optString("album", ""))
+                        .put("lyrics", imported.optString("lyrics", ""))
+                        .put("audioFile", audioUrl)
+                        .put("coverFile", coverUrl)
+                        .put("createdAt", System.currentTimeMillis())
+
+                    synchronized(jsonLock) {
+                        val arr = readJsonArray(songsJsonFile)
+                        val updated = JSONArray()
+                        updated.put(newSong)
+                        for (k in 0 until arr.length()) updated.put(arr.get(k))
+                        songsJsonFile.writeText(updated.toString(), StandardCharsets.UTF_8)
+                    }
+                    addSongIdToPlaylist(plId, songId)
+                    plImportDownloaded++
+                }
+                plImportCurrentTitle = "Hotovo"
+                plImportState = "done"
+            } catch (e: Exception) {
+                plImportError = e.message ?: "Stahování playlistu selhalo."
+                plImportState = "error"
+            }
+        }
+    }
+
+    private fun addSongIdToPlaylist(plId: String, songId: String) {
+        synchronized(jsonLock) {
+            val pls = readJsonArray(playlistsJsonFile)
+            for (i in 0 until pls.length()) {
+                val pl = pls.getJSONObject(i)
+                if (pl.optString("id") == plId) {
+                    val ids = pl.optJSONArray("songIds") ?: JSONArray()
+                    var exists = false
+                    for (j in 0 until ids.length()) {
+                        if (ids.optString(j) == songId) { exists = true; break }
+                    }
+                    if (!exists) ids.put(songId)
+                    pl.put("songIds", ids)
+                    break
+                }
+            }
+            playlistsJsonFile.writeText(pls.toString(), StandardCharsets.UTF_8)
         }
     }
 

@@ -3,8 +3,10 @@ package com.tomas.songapp
 import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.net.Uri
@@ -13,6 +15,7 @@ import android.os.Bundle
 import android.provider.Settings
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.webkit.JavascriptInterface
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
@@ -24,6 +27,9 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
 import java.io.File
 
 class MainActivity : AppCompatActivity() {
@@ -35,7 +41,7 @@ class MainActivity : AppCompatActivity() {
 
     private class BackgroundWebView(context: Context) : WebView(context) {
         override fun onWindowVisibilityChanged(visibility: Int) {
-            // Keep WebView audio, Web Audio FX, and JS song-end timers alive when app is in background or screen locked
+            // Keep WebView audio, Web Audio FX (Reverb/Pitch), and song-end auto-advance alive in background
             super.onWindowVisibilityChanged(View.VISIBLE)
         }
     }
@@ -43,6 +49,18 @@ class MainActivity : AppCompatActivity() {
     private lateinit var webView: WebView
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
     private var pendingInstallAfterPermission = false
+    private var insetTopDp = 0
+    private var insetBottomDp = 0
+    private var webReady = false
+
+    private val screenReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.action) {
+                Intent.ACTION_SCREEN_OFF -> notifyBackgroundState(true)
+                Intent.ACTION_SCREEN_ON -> if (!isFinishing) notifyBackgroundState(false)
+            }
+        }
+    }
 
     private val fileChooserLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -75,7 +93,22 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        // True edge-to-edge layout for POCO F9 Ultra & modern tall punch-hole displays
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        window.statusBarColor = Color.TRANSPARENT
+        window.navigationBarColor = Color.TRANSPARENT
+
         requestNotificationPermissionIfNeeded()
+
+        val screenFilter = IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_OFF)
+            addAction(Intent.ACTION_SCREEN_ON)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(screenReceiver, screenFilter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(screenReceiver, screenFilter)
+        }
 
         val server = sharedServer ?: LocalAppServer(applicationContext).also {
             it.start()
@@ -88,7 +121,8 @@ class MainActivity : AppCompatActivity() {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
-            setBackgroundColor(Color.parseColor("#09090E"))
+            setBackgroundColor(Color.parseColor("#0B0D12"))
+            overScrollMode = View.OVER_SCROLL_NEVER
             settings.apply {
                 javaScriptEnabled = true
                 domStorageEnabled = true
@@ -102,7 +136,13 @@ class MainActivity : AppCompatActivity() {
                 loadWithOverviewMode = true
             }
             addJavascriptInterface(AndroidBridge(), "AndroidApp")
-            webViewClient = object : WebViewClient() {}
+            webViewClient = object : WebViewClient() {
+                override fun onPageFinished(view: WebView?, url: String?) {
+                    super.onPageFinished(view, url)
+                    webReady = true
+                    pushSafeInsetsToWeb()
+                }
+            }
             webChromeClient = object : WebChromeClient() {
                 override fun onShowFileChooser(
                     view: WebView?,
@@ -132,6 +172,19 @@ class MainActivity : AppCompatActivity() {
         }
 
         setContentView(webView)
+
+        // Inject real system bar + display cutout insets (fixes punch-hole & gesture bar on POCO F9 Ultra)
+        ViewCompat.setOnApplyWindowInsetsListener(webView) { _, insets ->
+            val sys = insets.getInsets(
+                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
+            )
+            val density = resources.displayMetrics.density.coerceAtLeast(1f)
+            insetTopDp = Math.ceil((sys.top / density).toDouble()).toInt()
+            insetBottomDp = Math.ceil((sys.bottom / density).toDouble()).toInt()
+            pushSafeInsetsToWeb()
+            insets
+        }
+
         webView.loadUrl("http://127.0.0.1:$port/")
 
         MusicForegroundService.onMediaAction = { act ->
@@ -164,21 +217,53 @@ class MainActivity : AppCompatActivity() {
         })
     }
 
+    private fun pushSafeInsetsToWeb() {
+        if (!webReady || !::webView.isInitialized) return
+        val js = "document.documentElement.style.setProperty('--safe-top','${insetTopDp}px');" +
+            "document.documentElement.style.setProperty('--safe-bottom','${insetBottomDp}px');"
+        webView.evaluateJavascript(js, null)
+    }
+
+    private fun notifyBackgroundState(isBg: Boolean) {
+        if (!webReady || !::webView.isInitialized) return
+        runOnUiThread {
+            webView.evaluateJavascript(
+                "window.handleAndroidBackgroundState && window.handleAndroidBackgroundState($isBg);",
+                null
+            )
+        }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        notifyBackgroundState(false)
+    }
+
+    override fun onStop() {
+        super.onStop()
+        notifyBackgroundState(true)
+    }
+
     override fun onPause() {
         super.onPause()
-        // Keep timers active in background so next-song auto-advance works seamlessly
         if (::webView.isInitialized) webView.resumeTimers()
     }
 
     override fun onResume() {
         super.onResume()
         if (::webView.isInitialized) webView.resumeTimers()
+        notifyBackgroundState(false)
         if (pendingInstallAfterPermission) {
             pendingInstallAfterPermission = false
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O || packageManager.canRequestPackageInstalls()) {
                 launchApkInstaller()
             }
         }
+    }
+
+    override fun onDestroy() {
+        try { unregisterReceiver(screenReceiver) } catch (_: Exception) {}
+        super.onDestroy()
     }
 
     private fun requestNotificationPermissionIfNeeded() {
@@ -224,11 +309,21 @@ class MainActivity : AppCompatActivity() {
         fun isNative(): Boolean = true
 
         @JavascriptInterface
+        fun setKeepScreenOn(keepOn: Boolean) {
+            runOnUiThread {
+                if (keepOn) {
+                    window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                } else {
+                    window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                }
+            }
+        }
+
+        @JavascriptInterface
         fun setSystemBarColor(r: Int, g: Int, b: Int) {
             runOnUiThread {
                 try {
                     val c = Color.rgb(r.coerceIn(0, 255), g.coerceIn(0, 255), b.coerceIn(0, 255))
-                    window.statusBarColor = c
                     window.navigationBarColor = c
                 } catch (_: Exception) {}
             }
